@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, PutBucketCorsCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, PutBucketCorsCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config( {
   path: '.env.local'
@@ -39,7 +39,30 @@ async function getPdfDataUrlFromB2(key){
   const chunks=[];for await(const chunk of out.Body)chunks.push(Buffer.from(chunk));
   return 'data:application/pdf;base64,'+Buffer.concat(chunks).toString('base64');
 }
-async function deletePdfFromB2(key){if(key&&b2)await b2.send(new DeleteObjectCommand({Bucket:process.env.B2_BUCKET,Key:key}));}
+async function deletePdfFromB2(key){
+  if(!key||!b2)return;
+  let KeyMarker;
+  let VersionIdMarker;
+  do{
+    const page=await b2.send(new ListObjectVersionsCommand({
+      Bucket:process.env.B2_BUCKET,
+      Prefix:key,
+      ...(KeyMarker?{KeyMarker}:{}),
+      ...(VersionIdMarker?{VersionIdMarker}:{})
+    }));
+    const versions=[...(page.Versions||[]),...(page.DeleteMarkers||[])]
+      .filter(v=>v.Key===key&&v.VersionId);
+    for(const version of versions){
+      await b2.send(new DeleteObjectCommand({
+        Bucket:process.env.B2_BUCKET,
+        Key:key,
+        VersionId:version.VersionId
+      }));
+    }
+    KeyMarker=page.IsTruncated?page.NextKeyMarker:undefined;
+    VersionIdMarker=page.IsTruncated?page.NextVersionIdMarker:undefined;
+  }while(KeyMarker||VersionIdMarker);
+}
 async function uploadTemplateToB2(examId,questions){
   const key=`exams/${examId}.json`;
   await requireB2().send(new PutObjectCommand({
@@ -720,12 +743,18 @@ app.delete('/api/teacher/exams/:id', async(req,res)=>{
     const u=await requireRole(req,res,'teacher');if(!u)return;
     const current=await pool.query('SELECT id,content_object_key,pdf_object_key FROM exams WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
     if(!current.rows[0])return res.status(404).json({error:'Exam not found.'});
+    const keys=[current.rows[0].content_object_key,current.rows[0].pdf_object_key]
+      .filter((key,index,array)=>key&&array.indexOf(key)===index);
+    // B2 is versioned: remove every version/delete marker before removing
+    // the database record so an exam delete actually releases stored bytes.
+    for(const key of keys)await deletePdfFromB2(key);
     const result=await pool.query('DELETE FROM exams WHERE id=$1 AND owner_user_id=$2 RETURNING id',[req.params.id,u.id]);
     if(!result.rows[0])return res.status(404).json({error:'Exam not found.'});
-    const key=current.rows[0].content_object_key||current.rows[0].pdf_object_key;
-    if(key)await deletePdfFromB2(key);
     res.json({ok:true,examId:result.rows[0].id});
-  }catch(err){console.error(err);res.status(500).json({error:'Could not delete exam.'});}
+  }catch(err){
+    console.error('Could not delete exam:',err);
+    res.status(500).json({error:'Could not delete exam. Storage was not fully cleaned up.'});
+  }
 });
 app.get('/api/teacher/exams/:id/results', async(req,res)=>{
   try{
