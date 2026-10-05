@@ -297,8 +297,7 @@ app.get('/app/acadex-app-7f3c9e21/main', (req,res) => {
   } catch (_) {
     res.status(500).send('Acadex app is unavailable.');
   }
-});
-function makeToken() {
+});function makeToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 function makeDeviceId() {
@@ -439,12 +438,24 @@ async function initDatabase(){
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS result_visibility TEXT NOT NULL DEFAULT 'instant';
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS archived_at BIGINT NULL;
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS peers_visible BOOLEAN NOT NULL DEFAULT true;
-    ALTER TABLE exam_submissions ALTER COLUMN score TYPE NUMERIC(8,2) USING score::numeric(8,2);
-    ALTER TABLE exam_submissions ALTER COLUMN total TYPE NUMERIC(8,2) USING total::numeric(8,2);
+  
     CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_submissions_public_result_token ON exam_submissions(public_result_token) WHERE public_result_token IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_exam ON exam_submissions(exam_id);
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_student ON exam_submissions(exam_id, student_id);
   `);
+  const scoreType=await pool.query(`
+    SELECT column_name,data_type,numeric_precision,numeric_scale
+    FROM information_schema.columns
+    WHERE table_name='exam_submissions' AND column_name IN ('score','total')
+  `);
+  const needsScoreType=scoreType.rows.some(x=>x.data_type!=='numeric'||Number(x.numeric_precision)!==8||Number(x.numeric_scale)!==2);
+  if(needsScoreType){
+    await pool.query(`
+      ALTER TABLE exam_submissions
+        ALTER COLUMN score TYPE NUMERIC(8,2) USING score::numeric(8,2),
+        ALTER COLUMN total TYPE NUMERIC(8,2) USING total::numeric(8,2)
+    `);
+  }
   await migrateExamContentToB2();
   console.log('Neon database ready.');
   // Set CORS on B2 bucket so browsers can PUT directly
@@ -597,8 +608,7 @@ app.delete('/api/auth/account', async(req,res)=>{
     const u=await getAuthUser(req);
     if(!u)return res.status(401).json({error:'Not logged in.'});
     const password=String(req.body?.password||'');    if(!password)return res.status(400).json({error:'Password is required.'});
-    const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);
-    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
+    const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
 
     await client.query('BEGIN');
     const ownedExams=await client.query('SELECT content_object_key,pdf_object_key FROM exams WHERE owner_user_id=$1 AND (content_object_key IS NOT NULL OR pdf_object_key IS NOT NULL)',[u.id]);
@@ -790,7 +800,7 @@ app.get('/api/teacher/exams/:id/results', async(req,res)=>{
     res.json({exam:{id:exam.id,title:exam.title,type:exam.type,url:examUrl,passMarkPercent:exam.pass_mark_percent==null?null:Number(exam.pass_mark_percent),negativeMarking:Number(exam.negative_marking||0),resultVisibility:exam.result_visibility||'instant',peersVisible:exam.peers_visible!==false,archived:Boolean(exam.archived_at),archivedAt:exam.archived_at==null?null:Number(exam.archived_at)},pdf:false,results:rows.map(x=>({...numericSubmission(x),publicResultToken:x.public_result_token||null,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(x.public_result_token)):null,passed:passedForExam(exam,Number(x.percentage)),submittedAt:Number(x.submitted_at),attemptNumber:Number(x.attempt_number),attemptCount:Number(x.attempt_count)}))});
   }catch(err){console.error(err);res.status(500).json({error:'Could not load results.'});}
 });
-app.get('/api/teacher/submissions/:id', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at,e.id AS exam_id,e.title FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND e.owner_user_id=$2 AND e.type='template'`,[req.params.id,u.id]);if(!rows[0])return res.status(404).json({error:'Result not found.'});const r=rows[0];res.json({submissionId:r.id,publicResultToken:r.public_result_token||null,publicResultUrl:r.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`):null,examId:r.exam_id,examTitle:r.title,studentId:r.student_id,studentName:r.student_name,score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),passed:passedForExam(r,Number(r.percentage)),answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)});}catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});} });
+app.get('/api/teacher/submissions/:id', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at,e.id AS exam_id,e.title,e.pass_mark_percent FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND e.owner_user_id=$2 AND e.type='template'`,[req.params.id,u.id]);if(!rows[0])return res.status(404).json({error:'Result not found.'});const r=rows[0];res.json({submissionId:r.id,publicResultToken:r.public_result_token||null,publicResultUrl:r.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`):null,examId:r.exam_id,examTitle:r.title,studentId:r.student_id,studentName:r.student_name,score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),passed:passedForExam(r,Number(r.percentage)),answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)});}catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});} });
 app.get('/api/student/results', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'student');if(!u)return;
@@ -865,12 +875,12 @@ app.get('/api/teacher/students/:studentId', async(req,res)=>{
       LIMIT 1`,[studentId,u.id]);
     const st=student.rows[0];
     if(!st)return res.status(404).json({error:'Student not found.'});
-    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,s.score,s.total,s.percentage,s.submitted_at
+    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,e.pass_mark_percent,s.score,s.total,s.percentage,s.submitted_at
       FROM exam_submissions s
       JOIN exams e ON e.id=s.exam_id
       WHERE s.student_user_id=$1 AND e.owner_user_id=$2 AND e.type='template'
       ORDER BY s.submitted_at DESC`,[studentId,u.id]);
-    const results=rows.map(x=>({...x,score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),submittedAt:Number(x.submitted_at),publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null}));
+    const results=rows.map(x=>({...x,score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),passed:passedForExam(x,Number(x.percentage)),passMarkPercent:x.pass_mark_percent==null?null:Number(x.pass_mark_percent),submittedAt:Number(x.submitted_at),publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null}));
     const average=results.length ? Number((results.reduce((sum,x)=>sum+Number(x.percentage||0),0)/results.length).toFixed(2)) : 0;
     res.json({
       student:{id:st.id,email:st.email,displayName:st.display_name,studentId:st.student_id},
@@ -897,8 +907,7 @@ app.get('/api/teacher/students/:studentId/results/:submissionId', async(req,res)
     }
     res.json({
       submissionId:r.id,publicResultUrl:((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`),examId:r.exam_id,examTitle:r.title,
-      studentId:r.student_id,studentName:r.student_name,studentEmail:r.student_email,
-      score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),
+      studentId:r.student_id,studentName:r.student_name,studentEmail:r.student_email,      score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),
       answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)
     });
   }catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});}
@@ -1197,8 +1206,7 @@ app.post('/api/exam/:id/progress', async(req,res) => {
     const safeProgress={
       answers:progress.answers && typeof progress.answers==='object' ? progress.answers : {},
       currentQuestion:Number.isInteger(Number(progress.currentQuestion)) ? Math.max(0,Number(progress.currentQuestion)) : 0,
-      pdfPage:Number.isInteger(Number(progress.pdfPage)) ? Math.max(1,Number(progress.pdfPage)) : 1,
-      pdfScrollRatio:Number.isFinite(Number(progress.pdfScrollRatio)) ? Math.min(1,Math.max(0,Number(progress.pdfScrollRatio))) : 0    };
+      pdfPage:Number.isInteger(Number(progress.pdfPage)) ? Math.max(1,Number(progress.pdfPage)) : 1,      pdfScrollRatio:Number.isFinite(Number(progress.pdfScrollRatio)) ? Math.min(1,Math.max(0,Number(progress.pdfScrollRatio))) : 0    };
 
     await pool.query(
       'UPDATE exam_sessions SET progress_json=$1 WHERE token=$2',
@@ -1497,8 +1505,7 @@ app.get('/exam/:id', async(req, res) => {
     return h?String(h).padStart(2, '0')+':'+String(m).padStart(2, '0')+':'+String(x).padStart(2, '0'):String(m).padStart(2, '0')+':'+String(x).padStart(2, '0')
   }
   function esc(v) {
-    return String(v??'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')}
-let progressSaveChain=Promise.resolve();
+    return String(v??'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')}let progressSaveChain=Promise.resolve();
 let progressSaveTimer=null;
 
 function sessionProgressSnapshot(extra={}){
@@ -1797,8 +1804,7 @@ async function renderPDF(pdfUrl){
   const resumePdfPage=Math.min(pdf.numPages,Math.max(1,Number(session.pdfPage)||1));
   const resumePdfRatio=Math.min(1,Math.max(0,Number(session.pdfScrollRatio)||0));
   requestAnimationFrame(()=>{
-    const target=slots[resumePdfPage-1];
-    if(target){
+    const target=slots[resumePdfPage-1];    if(target){
       paper.scrollTop=target.offsetTop;
     }else{
       paper.scrollTop=Math.max(0,(paper.scrollHeight-paper.clientHeight)*resumePdfRatio);
@@ -2097,7 +2103,5 @@ $('examStep').addEventListener('submit',e=>{e.preventDefault();enter()});
 });
 
 initDatabase().then(()=>{const PORT=process.env.PORT||3000;app.listen(PORT,()=>console.log(`Exam backend listening on port ${PORT}`));}).catch(error=>{console.error('Database initialization failed:',error);process.exit(1)});
-
-
 
 
