@@ -297,10 +297,7 @@ app.get('/app/acadex-app-7f3c9e21/main', (req,res) => {
   } catch (_) {
     res.status(500).send('Acadex app is unavailable.');
   }
-});
-
-
-function makeToken() {
+});function makeToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 function makeDeviceId() {
@@ -436,10 +433,29 @@ async function initDatabase(){
     );
     ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS student_user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
     ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS public_result_token TEXT;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS negative_marking NUMERIC NOT NULL DEFAULT 0;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS pass_mark_percent INT NULL;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS result_visibility TEXT NOT NULL DEFAULT 'instant';
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS archived_at BIGINT NULL;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS peers_visible BOOLEAN NOT NULL DEFAULT true;
+  
     CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_submissions_public_result_token ON exam_submissions(public_result_token) WHERE public_result_token IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_exam ON exam_submissions(exam_id);
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_student ON exam_submissions(exam_id, student_id);
   `);
+  const scoreType=await pool.query(`
+    SELECT column_name,data_type,numeric_precision,numeric_scale
+    FROM information_schema.columns
+    WHERE table_name='exam_submissions' AND column_name IN ('score','total')
+  `);
+  const needsScoreType=scoreType.rows.some(x=>x.data_type!=='numeric'||Number(x.numeric_precision)!==8||Number(x.numeric_scale)!==2);
+  if(needsScoreType){
+    await pool.query(`
+      ALTER TABLE exam_submissions
+        ALTER COLUMN score TYPE NUMERIC(8,2) USING score::numeric(8,2),
+        ALTER COLUMN total TYPE NUMERIC(8,2) USING total::numeric(8,2)
+    `);
+  }
   await migrateExamContentToB2();
   console.log('Neon database ready.');
   // Set CORS on B2 bucket so browsers can PUT directly
@@ -494,73 +510,95 @@ async function hydrateExamContent(exam){
   return exam;
 }
 async function getExam(id, options={}){
-  const { rows } = await pool.query(`SELECT id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id FROM exams WHERE id=$1`,[id]);
+  const { rows } = await pool.query(`SELECT id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible FROM exams WHERE id=$1`,[id]);
   const exam=rows[0]||null;
   if(!exam)return null;
   if(options.loadContent !== false) await hydrateExamContent(exam);
   return exam;
 }
 function parseQuestions(exam){
-  if(!exam.questions_json) return [];
-  try { return typeof exam.questions_json === 'string' ? JSON.parse(exam.questions_json) : exam.questions_json; }
-  catch(_){ return []; }
+  if(!exam.questions_json)return [];
+  try{return typeof exam.questions_json==='string'?JSON.parse(exam.questions_json):exam.questions_json}catch(_){return []}
+}
+function normalizeTemplateQuestions(questions){
+  if(!Array.isArray(questions)||!questions.length)throw new Error('template exams require at least one question');
+  return questions.map(q=>{
+    if(!q||!['mcq','tf'].includes(q.type)||typeof q.text!=='string'||!q.text.trim())throw new Error('invalid question');
+    if(q.type==='mcq'&&(!Array.isArray(q.options)||q.options.length!==4||q.options.some(o=>typeof o!=='string'||!o.trim())||!Number.isInteger(Number(q.answer))||Number(q.answer)<0||Number(q.answer)>3))throw new Error('invalid MCQ question');
+    if(q.type==='tf'&&q.answer!=='true'&&q.answer!=='false')throw new Error('invalid True/False question');
+    const marks=q.marks===undefined?1:Number(q.marks);
+    if(!Number.isFinite(marks)||marks<=0||marks>100)throw new Error('question marks must be a number greater than 0 and at most 100');
+    return {...q,marks:Number(marks)};
+  });
+}
+function normalizeNegativeMarking(value,fallback=0){
+  const n=value===undefined||value===null||value===''?Number(fallback):Number(value);
+  if(!Number.isFinite(n)||n<0||n>1)throw new Error('negativeMarking must be a number from 0 to 1');
+  return n;
+}
+function normalizePassMark(value,fallback=null){
+  if(value===undefined)return fallback;
+  if(value===null||value==='')return null;
+  const n=Number(value);
+  if(!Number.isInteger(n)||n<0||n>100)throw new Error('passMarkPercent must be an integer from 0 to 100 or null');
+  return n;
+}
+function normalizeResultVisibility(value,fallback='instant'){
+  const v=value===undefined||value===null||value===''?fallback:String(value);
+  if(!['instant','score_only','hidden'].includes(v))throw new Error("resultVisibility must be 'instant', 'score_only', or 'hidden'");
+  return v;
+}
+function passedForExam(exam,percentage){
+  const pass=exam?.pass_mark_percent;
+  return pass===null||pass===undefined?null:Number(percentage)>=Number(pass);
+}
+function examSettings(exam){
+  return {
+    passMarkPercent:exam?.pass_mark_percent===null||exam?.pass_mark_percent===undefined?null:Number(exam.pass_mark_percent),
+    negativeMarking:Number(exam?.negative_marking||0),
+    resultVisibility:exam?.result_visibility||'instant',
+    peersVisible:exam?.peers_visible!==false,
+    archived:Boolean(exam?.archived_at),
+    archivedAt:exam?.archived_at===null||exam?.archived_at===undefined?null:Number(exam.archived_at)
+  };
 }
 function publicExam(exam){
-  return { examId:exam.id, title:exam.title, type:exam.type, pdfDataUrl:exam.pdf_data_url||null, questions:parseQuestions(exam), durationMs:Number(exam.duration_ms), createdAt:Number(exam.created_at), allowRetake:Boolean(exam.allow_retake), maxAttempts:exam.max_attempts===null||exam.max_attempts===undefined?null:Number(exam.max_attempts) };
+  return {examId:exam.id,title:exam.title,type:exam.type,pdfDataUrl:exam.pdf_data_url||null,questions:parseQuestions(exam),durationMs:Number(exam.duration_ms),createdAt:Number(exam.created_at),allowRetake:Boolean(exam.allow_retake),maxAttempts:exam.max_attempts===null||exam.max_attempts===undefined?null:Number(exam.max_attempts)};
 }
-function gradeExam(exam, answers){
-  const questions=parseQuestions(exam);
-  const submitted=answers && typeof answers==='object' ? answers : {};
-  const results=[];
-  let score=0;
-
+function gradeExam(exam,answers){
+  const questions=parseQuestions(exam),submitted=answers&&typeof answers==='object'?answers:{},results=[];
+  let score=0,total=0;
   questions.forEach((q,i)=>{
-    const key=String(i);
-    const raw=submitted[key];
-    const unanswered=raw===undefined||raw===null||String(raw)==='';
-    let yourAnswer=unanswered?'Unanswered':String(raw);
-    let correctAnswer='';
-
+    const marks=q.marks===undefined?1:Number(q.marks);
+    total+=Number.isFinite(marks)&&marks>0?marks:1;
+    const raw=submitted[String(i)],unanswered=raw===undefined||raw===null||String(raw)==='';
     if(q.type==='mcq'){
-      const correctIndex=Number(q.answer);
-      correctAnswer=Number.isInteger(correctIndex)&&q.options?.[correctIndex]!==undefined
-        ? String(q.options[correctIndex])
-        : '—';
-      const selectedIndex=unanswered?null:Number(raw);
-      const correct=!unanswered && Number.isInteger(selectedIndex) && selectedIndex===correctIndex;
-      if(correct) score++;
-      results.push({
-        questionNumber:i+1,
-        question:q.text||'',
-        yourAnswer:unanswered?'Unanswered':(q.options?.[selectedIndex]!==undefined?String(q.options[selectedIndex]):String(raw)),
-        correctAnswer,
-        correct
-      });
+      const ci=Number(q.answer),correctAnswer=Number.isInteger(ci)&&q.options?.[ci]!==undefined?String(q.options[ci]):'—';
+      const si=unanswered?null:Number(raw),correct=!unanswered&&Number.isInteger(si)&&si===ci;
+      if(correct)score+=marks;else if(!unanswered)score-=Number(exam.negative_marking||0)*marks;
+      results.push({questionNumber:i+1,question:q.text||'',yourAnswer:unanswered?'Unanswered':(q.options?.[si]!==undefined?String(q.options[si]):String(raw)),correctAnswer,correct});
     }else if(q.type==='tf'){
-      const correctValue=String(q.answer);
-      correctAnswer=correctValue==='true'?'True':correctValue==='false'?'False':'—';
-      const selected=unanswered?'':String(raw).toLowerCase();
-      const correct=!unanswered && selected===correctValue;
-      if(correct) score++;
-      results.push({
-        questionNumber:i+1,
-        question:q.text||'',
-        yourAnswer:unanswered?'Unanswered':(selected==='true'?'True':selected==='false'?'False':String(raw)),
-        correctAnswer,
-        correct
-      });
+      const cv=String(q.answer),correctAnswer=cv==='true'?'True':cv==='false'?'False':'—',selected=unanswered?'':String(raw).toLowerCase(),correct=!unanswered&&selected===cv;
+      if(correct)score+=marks;else if(!unanswered)score-=Number(exam.negative_marking||0)*marks;
+      results.push({questionNumber:i+1,question:q.text||'',yourAnswer:unanswered?'Unanswered':(selected==='true'?'True':selected==='false'?'False':String(raw)),correctAnswer,correct});
     }
   });
-
-  const total=questions.length;
-  const percentage=total ? Number(((score/total)*100).toFixed(2)) : 0;
-  return {score,total,percentage,results};
+  score=Math.max(0,Number(score.toFixed(2)));total=Number(total.toFixed(2));
+  const percentage=total?Number(((score/total)*100).toFixed(2)):0;
+  return {score,total,percentage,results,passed:passedForExam(exam,percentage)};
 }
+function visibleResultPayload(exam,row,base={}){
+  if((exam?.result_visibility||'instant')==='hidden')return {submitted:true,released:false};
+  const payload={...base,score:Number(row.score),total:Number(row.total),percentage:Number(row.percentage),passed:passedForExam(exam,Number(row.percentage))};
+  if((exam?.result_visibility||'instant')==='score_only'){delete payload.answers;delete payload.results;}
+  return payload;
+}
+function numericSubmission(row){return {...row,score:Number(row.score),total:Number(row.total),percentage:Number(row.percentage)}}
 
 
 
-app.post('/api/auth/register', async(req,res)=>{ try{ const {role,email,password,displayName,studentId}=req.body||{}; if(!['teacher','student'].includes(role))return res.status(400).json({error:'Choose teacher or student.'}); const e=String(email||'').trim().toLowerCase(); const p=String(password||''); const n=String(displayName||'').trim(); if(!e||!e.includes('@'))return res.status(400).json({error:'Enter a valid email.'}); if(p.length<6)return res.status(400).json({error:'Password must be at least 6 characters.'}); if(n.length<2)return res.status(400).json({error:'Enter your name.'}); if(role==='student'&&!String(studentId||'').trim())return res.status(400).json({error:'Student ID is required.'}); const exists=await pool.query('SELECT id FROM users WHERE email=$1',[e]); if(exists.rows[0])return res.status(409).json({error:'An account with that email already exists.'}); const id='usr_'+crypto.randomBytes(12).toString('hex'); await pool.query('INSERT INTO users(id,role,email,password_hash,display_name,student_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,role,e,makePasswordHash(p),n,role==='student'?String(studentId).trim():null,Date.now()]); const token=makeToken(); await pool.query('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at) VALUES($1,$2,$3,$4)',[hashToken(token),id,Date.now(),Date.now()+1000*60*60*24*30]); res.json({token,user:{id,role,email:e,displayName:n,studentId:role==='student'?String(studentId).trim():null}}); }catch(err){console.error(err);res.status(500).json({error:'Could not create account.'});} });
-app.post('/api/auth/login', async(req,res)=>{ try{ const e=String(req.body?.email||'').trim().toLowerCase(), p=String(req.body?.password||''); const {rows}=await pool.query('SELECT id,role,email,password_hash,display_name,student_id FROM users WHERE email=$1',[e]); const u=rows[0]; if(!u||!verifyPassword(p,u.password_hash))return res.status(401).json({error:'Incorrect email or password.'}); const token=makeToken(); await pool.query('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at) VALUES($1,$2,$3,$4)',[hashToken(token),u.id,Date.now(),Date.now()+1000*60*60*24*30]); res.json({token,user:{id:u.id,role:u.role,email:u.email,displayName:u.display_name,studentId:u.student_id}}); }catch(err){console.error(err);res.status(500).json({error:'Could not log in.'});} });
+app.post('/api/auth/register', async(req,res)=>{ try{ const {role,email,password,displayName,studentId}=req.body||{}; if(!['teacher','student'].includes(role))return res.status(400).json({error:'Choose teacher or student.'}); const e=String(email||'').trim().toLowerCase(); const p=String(password||''); const n=String(displayName||'').trim(); if(!e||!e.includes('@'))return res.status(400).json({error:'Enter a valid email.'}); if(p.length<6)return res.status(400).json({error:'Password must be at least 6 characters.'}); if(n.length<2)return res.status(400).json({error:'Enter your name.'}); if(role==='student'&&!String(studentId||'').trim())return res.status(400).json({error:'Class is required.'}); const exists=await pool.query('SELECT id FROM users WHERE email=$1',[e]); if(exists.rows[0])return res.status(409).json({error:'An account with that email already exists.'}); const id='usr_'+crypto.randomBytes(12).toString('hex'); await pool.query('INSERT INTO users(id,role,email,password_hash,display_name,student_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,role,e,makePasswordHash(p),n,role==='student'?String(studentId).trim():null,Date.now()]); const token=makeToken(); await pool.query('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at) VALUES($1,$2,$3,$4)',[hashToken(token),id,Date.now(),Date.now()+1000*60*60*24*30]); res.json({token,user:{id,role,email:e,displayName:n,studentId:role==='student'?String(studentId).trim():null,className:role==='student'?String(studentId).trim():null}}); }catch(err){console.error(err);res.status(500).json({error:'Could not create account.'});} });
+app.post('/api/auth/login', async(req,res)=>{ try{ const e=String(req.body?.email||'').trim().toLowerCase(), p=String(req.body?.password||''); const {rows}=await pool.query('SELECT id,role,email,password_hash,display_name,student_id FROM users WHERE email=$1',[e]); const u=rows[0]; if(!u||!verifyPassword(p,u.password_hash))return res.status(401).json({error:'Incorrect email or password.'}); const token=makeToken(); await pool.query('INSERT INTO auth_sessions(token_hash,user_id,created_at,expires_at) VALUES($1,$2,$3,$4)',[hashToken(token),u.id,Date.now(),Date.now()+1000*60*60*24*30]); res.json({token,user:{id:u.id,role:u.role,email:u.email,displayName:u.display_name,studentId:u.student_id,className:u.student_id}}); }catch(err){console.error(err);res.status(500).json({error:'Could not log in.'});} });
 app.post('/api/auth/logout', async(req,res)=>{ try{ const raw=String(req.headers.authorization||'').replace(/^Bearer\s+/,'').trim(); if(raw)await pool.query('DELETE FROM auth_sessions WHERE token_hash=$1',[hashToken(raw)]); res.json({ok:true}); }catch(err){res.status(500).json({error:'Could not log out.'});} });
 app.delete('/api/auth/account', async(req,res)=>{
   const client=await pool.connect();
@@ -569,10 +607,8 @@ app.delete('/api/auth/account', async(req,res)=>{
     if(!raw)return res.status(401).json({error:'Not logged in.'});
     const u=await getAuthUser(req);
     if(!u)return res.status(401).json({error:'Not logged in.'});
-    const password=String(req.body?.password||'');
-    if(!password)return res.status(400).json({error:'Password is required.'});
-    const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);
-    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
+    const password=String(req.body?.password||'');    if(!password)return res.status(400).json({error:'Password is required.'});
+    const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
 
     await client.query('BEGIN');
     const ownedExams=await client.query('SELECT content_object_key,pdf_object_key FROM exams WHERE owner_user_id=$1 AND (content_object_key IS NOT NULL OR pdf_object_key IS NOT NULL)',[u.id]);
@@ -592,12 +628,11 @@ app.delete('/api/auth/account', async(req,res)=>{
     res.status(500).json({error:'Could not delete the account.'});
   }finally{client.release();}
 });
-app.get('/api/auth/me', async(req,res)=>{ try{const u=await getAuthUser(req); if(!u)return res.status(401).json({error:'Not logged in.'}); res.json({user:{id:u.id,role:u.role,email:u.email,displayName:u.display_name,studentId:u.student_id}});}catch(err){res.status(500).json({error:'Could not load account.'});} });
+app.get('/api/auth/me', async(req,res)=>{ try{const u=await getAuthUser(req); if(!u)return res.status(401).json({error:'Not logged in.'}); res.json({user:{id:u.id,role:u.role,email:u.email,displayName:u.display_name,studentId:u.student_id,className:u.student_id}});}catch(err){res.status(500).json({error:'Could not load account.'});} });
 app.post('/api/auth/change-password', async(req,res)=>{ try{ const u=await getAuthUser(req); if(!u)return res.status(401).json({error:'Not logged in.'}); const current=String(req.body?.currentPassword||''); const next=String(req.body?.newPassword||''); if(!current||!next)return res.status(400).json({error:'Both fields are required.'}); if(next.length<6)return res.status(400).json({error:'New password must be at least 6 characters.'}); const {rows}=await pool.query('SELECT password_hash FROM users WHERE id=$1',[u.id]); if(!rows[0]||!verifyPassword(current,rows[0].password_hash))return res.status(401).json({error:'Current password is incorrect.'}); await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2',[makePasswordHash(next),u.id]); res.json({ok:true}); }catch(err){console.error(err);res.status(500).json({error:'Could not change password.'});} });
 app.get('/api/admin/my-storage', async(req,res)=>{try{
   const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Not logged in.'});
   const {rows}=await pool.query(`SELECT id,title,type,created_at,content_object_key,pdf_object_key FROM exams WHERE owner_user_id=$1 ORDER BY created_at DESC`,[u.id]);
-
   /* B2 storage is shared by the whole Acadex bucket, not allocated per teacher.
      The storage manager therefore calculates the global B2 usage so every
      teacher sees the same quota/remaining amount. The exam list itself remains
@@ -636,7 +671,19 @@ app.get('/api/admin/my-storage', async(req,res)=>{try{
 }catch(err){console.error(err);res.status(500).json({error:'Could not fetch storage.'});}});
 
 app.get('/api/admin/db-size', async(req,res)=>{ try{ const u=await getAuthUser(req); if(!u)return res.status(401).json({error:'Not logged in.'}); const {rows}=await pool.query("SELECT pg_database_size(current_database()) AS size"); const bytes=Number(rows[0].size); res.json({usedBytes:bytes,version:ACADEX_VERSION}); }catch(err){console.error(err);res.status(500).json({error:'Could not fetch DB size.'});} });
-app.get('/api/teacher/exams', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT e.id,e.title,e.type,e.duration_ms,e.created_at,e.folder_id,f.name AS folder_name,COUNT(s.token)::int AS attempts FROM exams e LEFT JOIN exam_sessions s ON s.exam_id=e.id LEFT JOIN exam_folders f ON f.id=e.folder_id WHERE e.owner_user_id=$1 GROUP BY e.id,f.name ORDER BY e.created_at DESC`,[u.id]); res.json({exams:rows.map(x=>({...x,durationMs:Number(x.duration_ms),createdAt:Number(x.created_at)}))});}catch(err){console.error(err);res.status(500).json({error:'Could not load exams.'});} });
+app.get('/api/teacher/exams', async(req,res)=>{try{
+  const u=await requireRole(req,res,'teacher');if(!u)return;
+  const {rows}=await pool.query(`
+    SELECT e.id,e.title,e.type,e.duration_ms,e.created_at,e.folder_id,f.name AS folder_name,
+      (SELECT COUNT(*)::int FROM exam_sessions es WHERE es.exam_id=e.id) AS attempts,
+      (SELECT COUNT(*)::int FROM exam_submissions s WHERE s.exam_id=e.id) AS submitted_count,
+      (SELECT AVG(s.percentage) FROM exam_submissions s WHERE s.exam_id=e.id) AS avg_percentage,
+      e.pass_mark_percent,e.negative_marking,e.result_visibility,e.peers_visible,e.archived_at
+    FROM exams e LEFT JOIN exam_folders f ON f.id=e.folder_id
+    WHERE e.owner_user_id=$1 ORDER BY e.created_at DESC
+  `,[u.id]);
+  res.json({exams:rows.map(x=>({...x,durationMs:Number(x.duration_ms),createdAt:Number(x.created_at),attempts:Number(x.attempts||0),submittedCount:Number(x.submitted_count||0),avgPercentage:x.avg_percentage===null?null:Number(Number(x.avg_percentage).toFixed(2)),passMarkPercent:x.pass_mark_percent==null?null:Number(x.pass_mark_percent),negativeMarking:Number(x.negative_marking||0),resultVisibility:x.result_visibility||'instant',peersVisible:x.peers_visible!==false,archived:Boolean(x.archived_at),archivedAt:x.archived_at==null?null:Number(x.archived_at)}))});
+}catch(err){console.error(err);res.status(500).json({error:'Could not load exams.'});}});
 
 app.get('/api/teacher/folders', async(req,res)=>{
   try{
@@ -684,58 +731,42 @@ app.delete('/api/teacher/folders/:id', async(req,res)=>{
 app.get('/api/teacher/exams/:id', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher');if(!u)return;
-    const {rows}=await pool.query(`SELECT id,title,type,student_password,duration_ms,created_at,folder_id FROM exams WHERE id=$1 AND owner_user_id=$2`,[req.params.id,u.id]);
-    const e=rows[0];if(!e)return res.status(404).json({error:'Exam not found.'});
-    const full=await getExam(e.id);
-    const folder=await pool.query('SELECT name FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[e.folder_id,u.id]);
-    res.json({id:e.id,title:e.title,type:e.type,pdfDataUrl:full?.pdf_data_url||null,questions:parseQuestions(full),studentPassword:e.student_password,durationMs:Number(e.duration_ms),createdAt:Number(e.created_at),folderId:e.folder_id||null,folderName:folder.rows[0]?.name||null,url:(process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/exam/${encodeURIComponent(e.id)}`});
+    const full=await getExam(req.params.id);
+    if(!full||full.owner_user_id!==u.id)return res.status(404).json({error:'Exam not found.'});
+    const folder=await pool.query('SELECT name FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[full.folder_id,u.id]);
+    const stats=await pool.query('SELECT COUNT(*)::int AS submitted_count,AVG(percentage) AS avg_percentage FROM exam_submissions WHERE exam_id=$1',[full.id]);
+    res.json({id:full.id,title:full.title,type:full.type,pdfDataUrl:full.pdf_data_url||null,questions:parseQuestions(full),studentPassword:full.student_password,durationMs:Number(full.duration_ms),createdAt:Number(full.created_at),folderId:full.folder_id||null,folderName:folder.rows[0]?.name||null,url:(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/exam/'+encodeURIComponent(full.id),submittedCount:Number(stats.rows[0]?.submitted_count||0),avgPercentage:stats.rows[0]?.avg_percentage==null?null:Number(Number(stats.rows[0].avg_percentage).toFixed(2)),passMarkPercent:full.pass_mark_percent==null?null:Number(full.pass_mark_percent),negativeMarking:Number(full.negative_marking||0),resultVisibility:full.result_visibility||'instant',peersVisible:full.peers_visible!==false,archived:Boolean(full.archived_at),archivedAt:full.archived_at==null?null:Number(full.archived_at)});
   }catch(err){console.error(err);res.status(500).json({error:'Could not load exam.'});}
 });
+
 app.patch('/api/teacher/exams/:id', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher');if(!u)return;
-    const current=await pool.query('SELECT id,title,type,content_object_key,questions_json,pdf_data_url,pdf_object_key,student_password,duration_ms,folder_id,allow_retake,max_attempts FROM exams WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
-    const e=current.rows[0];if(!e)return res.status(404).json({error:'Exam not found.'});
-    const body=req.body||{};
-    const title=body.title===undefined?e.title:String(body.title||'').trim();
-    const password=body.studentPassword===undefined?e.student_password:String(body.studentPassword||'');
-    const duration=body.durationMs===undefined?Number(e.duration_ms):Number(body.durationMs);
-    const type=body.type===undefined?e.type:String(body.type);
-    const allowRetake=body.allowRetake===undefined?Boolean(e.allow_retake):Boolean(body.allowRetake);
-    const maxAttempts=body.maxAttempts===undefined?e.max_attempts:(body.maxAttempts===null||body.maxAttempts===''?null:Number(body.maxAttempts));
-    if(!title)return res.status(400).json({error:'title is required'});
-    if(!password)return res.status(400).json({error:'studentPassword is required'});
-    if(!Number.isFinite(duration)||duration<=0)return res.status(400).json({error:'durationMs must be a positive number'});
-    if(!['pdf','template'].includes(type))return res.status(400).json({error:'type must be pdf or template'});
-    let contentObjectKey=e.content_object_key||e.pdf_object_key||null,questions=e.questions_json?parseQuestions(e):[],pdfDataUrl=null;
-    if(type==='pdf'){
-      if(body.pdfDataUrl!==undefined){
-        contentObjectKey=await uploadPdfToB2(req.params.id,body.pdfDataUrl);
-      }else if(!contentObjectKey){
-        return res.status(400).json({error:'pdfDataUrl is required for PDF exams'});
-      }
-      questions=[];
-    }else{
-      questions=body.questions===undefined?questions:body.questions;
-      if(!Array.isArray(questions)||!questions.length)return res.status(400).json({error:'template exams require at least one question'});
-      for(const q of questions){
-        if(!q||!['mcq','tf'].includes(q.type)||typeof q.text!=='string'||!q.text.trim())return res.status(400).json({error:'invalid question'});
-        if(q.type==='mcq'&&(!Array.isArray(q.options)||q.options.length!==4||q.options.some(o=>typeof o!=='string'||!o.trim())||!Number.isInteger(Number(q.answer))||Number(q.answer)<0||Number(q.answer)>3))return res.status(400).json({error:'invalid MCQ question'});
-        if(q.type==='tf'&&q.answer!=='true'&&q.answer!=='false')return res.status(400).json({error:'invalid True/False question'});
-      }
-      contentObjectKey=await uploadTemplateToB2(req.params.id,questions);
-    }
+    const {rows}=await pool.query('SELECT id,title,type,content_object_key,questions_json,pdf_data_url,pdf_object_key,student_password,duration_ms,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible FROM exams WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+    const e=rows[0];if(!e)return res.status(404).json({error:'Exam not found.'});
+    const b=req.body||{},title=b.title===undefined?e.title:String(b.title||'').trim(),password=b.studentPassword===undefined?e.student_password:String(b.studentPassword||''),duration=b.durationMs===undefined?Number(e.duration_ms):Number(b.durationMs),type=b.type===undefined?e.type:String(b.type);
+    const allowRetake=b.allowRetake===undefined?Boolean(e.allow_retake):Boolean(b.allowRetake),maxAttempts=b.maxAttempts===undefined?e.max_attempts:(b.maxAttempts===null||b.maxAttempts===''?null:Number(b.maxAttempts));
+    const negativeMarking=normalizeNegativeMarking(b.negativeMarking,e.negative_marking||0),passMarkPercent=normalizePassMark(b.passMarkPercent,e.pass_mark_percent),resultVisibility=normalizeResultVisibility(b.resultVisibility,e.result_visibility||'instant'),peersVisible=b.peersVisible===undefined?e.peers_visible!==false:Boolean(b.peersVisible);
+    const archived=b.archived===undefined?Boolean(e.archived_at):Boolean(b.archived),archivedAt=b.archived===undefined?e.archived_at:(archived?Date.now():null);
+    if(!title)return res.status(400).json({error:'title is required'});if(!password)return res.status(400).json({error:'studentPassword is required'});if(!Number.isFinite(duration)||duration<=0)return res.status(400).json({error:'durationMs must be a positive number'});if(!['pdf','template'].includes(type))return res.status(400).json({error:'type must be pdf or template'});
+    if(maxAttempts!==null&&(!Number.isInteger(maxAttempts)||maxAttempts<1))return res.status(400).json({error:'maxAttempts must be a positive integer or null'});
     let folderId=e.folder_id||null;
-    if(body.folderId!==undefined){
-      folderId=body.folderId===null||body.folderId===''?null:String(body.folderId);
-      if(folderId){const f=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[folderId,u.id]);if(!f.rows[0])return res.status(400).json({error:'Folder not found.'});}
+    if(b.folderId!==undefined){folderId=b.folderId===null||b.folderId===''?null:String(b.folderId);if(folderId){const f=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[folderId,u.id]);if(!f.rows[0])return res.status(400).json({error:'Folder not found.'});}}
+    const contentChanged=(type==='pdf'&&(b.pdfDataUrl!==undefined||b.b2Key!==undefined))||(type==='template'&&b.questions!==undefined)||type!==e.type;
+    let contentObjectKey=e.content_object_key||e.pdf_object_key||null;
+    if(contentChanged){
+      if(type==='pdf'){
+        if(b.b2Key)contentObjectKey=String(b.b2Key);else if(b.pdfDataUrl!==undefined)contentObjectKey=await uploadPdfToB2(req.params.id,b.pdfDataUrl);else return res.status(400).json({error:'pdfDataUrl or b2Key is required when changing to a PDF exam'});
+      }else{
+        let normalized;try{normalized=normalizeTemplateQuestions(b.questions)}catch(err){return res.status(400).json({error:err.message})}
+        contentObjectKey=await uploadTemplateToB2(req.params.id,normalized);
+      }
     }
-    await pool.query('UPDATE exams SET title=$1,type=$2,pdf_data_url=NULL,pdf_object_key=NULL,content_object_key=$3,questions_json=NULL,student_password=$4,duration_ms=$5,folder_id=$6,allow_retake=$7,max_attempts=$8 WHERE id=$9 AND owner_user_id=$10',[title,type,contentObjectKey,password,duration,folderId,allowRetake,maxAttempts,e.id,u.id]);
-    if(e.content_object_key&&e.content_object_key!==contentObjectKey)await deletePdfFromB2(e.content_object_key);
-    else if(e.pdf_object_key&&e.pdf_object_key!==contentObjectKey)await deletePdfFromB2(e.pdf_object_key);
-    const baseUrl=process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`;
-    res.json({ok:true,examId:e.id,url:`${baseUrl}/exam/${encodeURIComponent(e.id)}`});
-  }catch(err){console.error(err);res.status(500).json({error:'Could not save exam changes.'});}
+    await pool.query('UPDATE exams SET title=$1,type=$2,pdf_data_url=NULL,pdf_object_key=NULL,content_object_key=$3,questions_json=NULL,student_password=$4,duration_ms=$5,folder_id=$6,allow_retake=$7,max_attempts=$8,negative_marking=$9,pass_mark_percent=$10,result_visibility=$11,archived_at=$12,peers_visible=$13 WHERE id=$14 AND owner_user_id=$15',[title,type,contentObjectKey,password,duration,folderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,archivedAt,peersVisible,e.id,u.id]);
+    if(contentChanged){if(e.content_object_key&&e.content_object_key!==contentObjectKey)await deletePdfFromB2(e.content_object_key);else if(e.pdf_object_key&&e.pdf_object_key!==contentObjectKey)await deletePdfFromB2(e.pdf_object_key);}
+    const baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');
+    res.json({ok:true,examId:e.id,url:baseUrl+'/exam/'+encodeURIComponent(e.id)});
+  }catch(err){console.error(err);res.status(400).json({error:err.message||'Could not save exam changes.'});}
 });
 app.delete('/api/teacher/exams/:id', async(req,res)=>{
   try{
@@ -757,72 +788,79 @@ app.delete('/api/teacher/exams/:id', async(req,res)=>{
 });
 app.get('/api/teacher/exams/:id/results', async(req,res)=>{
   try{
-    const u=await requireRole(req,res,'teacher'); if(!u)return;
-    const {rows:er}=await pool.query('SELECT id,title,type FROM exams WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const {rows:er}=await pool.query('SELECT id,title,type,pass_mark_percent,negative_marking,result_visibility,peers_visible,archived_at FROM exams WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
     if(!er[0])return res.status(404).json({error:'Exam not found.'});
-    const exam=er[0];
-    const examUrl=(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/exam/'+encodeURIComponent(req.params.id);
-
+    const exam=er[0],examUrl=(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/exam/'+encodeURIComponent(req.params.id);
     if(exam.type==='pdf'){
-      /*
-        PDF exams are submission/attempt tracking only. There is deliberately
-        no score/result view for them. Include active sessions as attempts and
-        completed submissions as submitted attempts.
-      */
-      const {rows}=await pool.query(`
-        SELECT
-          es.token AS session_token,
-          es.student_id,
-          es.student_name,
-          es.student_user_id,
-          es.created_at,
-          es.finished_at,
-          s.id AS submission_id,
-          s.submitted_at
-        FROM exam_sessions es
-        LEFT JOIN exam_submissions s ON s.session_token=es.token AND s.exam_id=es.exam_id
-        WHERE es.exam_id=$1
-        ORDER BY COALESCE(s.submitted_at,es.created_at) DESC
-      `,[req.params.id]);
-      return res.json({
-        exam:{...exam,url:examUrl},
-        pdf:true,
-        results:rows.map(x=>({
-          id:x.submission_id||null,
-          sessionToken:x.session_token,
-          studentId:x.student_id,
-          studentName:x.student_name,
-          studentUserId:x.student_user_id||null,
-          submitted:Boolean(x.submission_id),
-          attemptedAt:Number(x.created_at),
-          submittedAt:x.submitted_at?Number(x.submitted_at):null
-        }))
-      });
+      const {rows}=await pool.query(`SELECT es.token AS session_token,es.student_id,es.student_name,es.student_user_id,es.created_at,es.finished_at,s.id AS submission_id,s.submitted_at FROM exam_sessions es LEFT JOIN exam_submissions s ON s.session_token=es.token AND s.exam_id=es.exam_id WHERE es.exam_id=$1 ORDER BY COALESCE(s.submitted_at,es.created_at) DESC`,[req.params.id]);
+      return res.json({exam:{id:exam.id,title:exam.title,type:exam.type,url:examUrl,passMarkPercent:exam.pass_mark_percent==null?null:Number(exam.pass_mark_percent),negativeMarking:Number(exam.negative_marking||0),resultVisibility:exam.result_visibility||'instant',peersVisible:exam.peers_visible!==false,archived:Boolean(exam.archived_at),archivedAt:exam.archived_at==null?null:Number(exam.archived_at)},pdf:true,results:rows.map(x=>({id:x.submission_id||null,sessionToken:x.session_token,studentId:x.student_id,studentName:x.student_name,studentUserId:x.student_user_id||null,submitted:Boolean(x.submission_id),attemptedAt:Number(x.created_at),submittedAt:x.submitted_at?Number(x.submitted_at):null}))});
     }
-
-    const {rows}=await pool.query(`
-      SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.student_user_id,s.score,s.total,s.percentage,s.submitted_at,
-        ROW_NUMBER() OVER (PARTITION BY s.student_user_id ORDER BY s.submitted_at ASC)::int AS attempt_number,
-        COUNT(*) OVER (PARTITION BY s.student_user_id)::int AS attempt_count
-      FROM exam_submissions s
-      JOIN exams e ON e.id=s.exam_id
-      WHERE s.exam_id=$1 AND e.type='template'
-      ORDER BY s.student_user_id, s.submitted_at DESC
-    `,[req.params.id]);
-    res.json({
-      exam:{...exam,url:examUrl},
-      pdf:false,
-      results:rows.map(x=>({...x,publicResultToken:x.public_result_token||null,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null,percentage:Number(x.percentage),submittedAt:Number(x.submitted_at)}))
-    });
+    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.student_user_id,s.score,s.total,s.percentage,s.submitted_at,ROW_NUMBER() OVER(PARTITION BY s.student_user_id ORDER BY s.submitted_at ASC)::int AS attempt_number,COUNT(*) OVER(PARTITION BY s.student_user_id)::int AS attempt_count FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.exam_id=$1 AND e.type='template' ORDER BY s.student_user_id,s.submitted_at DESC`,[req.params.id]);
+    res.json({exam:{id:exam.id,title:exam.title,type:exam.type,url:examUrl,passMarkPercent:exam.pass_mark_percent==null?null:Number(exam.pass_mark_percent),negativeMarking:Number(exam.negative_marking||0),resultVisibility:exam.result_visibility||'instant',peersVisible:exam.peers_visible!==false,archived:Boolean(exam.archived_at),archivedAt:exam.archived_at==null?null:Number(exam.archived_at)},pdf:false,results:rows.map(x=>({...numericSubmission(x),publicResultToken:x.public_result_token||null,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(x.public_result_token)):null,passed:passedForExam(exam,Number(x.percentage)),submittedAt:Number(x.submitted_at),attemptNumber:Number(x.attempt_number),attemptCount:Number(x.attempt_count)}))});
   }catch(err){console.error(err);res.status(500).json({error:'Could not load results.'});}
 });
-app.get('/api/teacher/submissions/:id', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at,e.id AS exam_id,e.title FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND e.owner_user_id=$2 AND e.type='template'`,[req.params.id,u.id]);if(!rows[0])return res.status(404).json({error:'Result not found.'});const r=rows[0];res.json({submissionId:r.id,publicResultToken:r.public_result_token||null,publicResultUrl:r.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`):null,examId:r.exam_id,examTitle:r.title,studentId:r.student_id,studentName:r.student_name,score:r.score,total:r.total,percentage:Number(r.percentage),answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)});}catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});} });
-app.get('/api/student/results', async(req,res)=>{ try{const u=await requireRole(req,res,'student');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,s.score,s.total,s.percentage,s.submitted_at,
-      ROW_NUMBER() OVER (PARTITION BY s.exam_id ORDER BY s.submitted_at ASC)::int AS attempt_number,
-      COUNT(*) OVER (PARTITION BY s.exam_id)::int AS attempt_count
-      FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.student_user_id=$1 AND e.type='template' ORDER BY s.submitted_at DESC`,[u.id]);res.json({results:rows.map(x=>({...x,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null,percentage:Number(x.percentage),submittedAt:Number(x.submitted_at)}))});}catch(err){console.error(err);res.status(500).json({error:'Could not load results.'});} });
-
-app.get('/api/student/results/:id', async(req,res)=>{ try{const u=await requireRole(req,res,'student');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.exam_id,e.title,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND s.student_user_id=$2 AND e.type='template'`,[req.params.id,u.id]); if(!rows[0])return res.status(404).json({error:'Result not found.'}); const r=rows[0]; res.json({submissionId:r.id,examId:r.exam_id,examTitle:r.title,score:r.score,total:r.total,percentage:Number(r.percentage),answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)}); }catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});} });
+app.get('/api/teacher/submissions/:id', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.student_id,s.student_name,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at,e.id AS exam_id,e.title,e.pass_mark_percent FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND e.owner_user_id=$2 AND e.type='template'`,[req.params.id,u.id]);if(!rows[0])return res.status(404).json({error:'Result not found.'});const r=rows[0];res.json({submissionId:r.id,publicResultToken:r.public_result_token||null,publicResultUrl:r.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`):null,examId:r.exam_id,examTitle:r.title,studentId:r.student_id,studentName:r.student_name,score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),passed:passedForExam(r,Number(r.percentage)),answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)});}catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});} });
+app.get('/api/student/results', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,e.result_visibility,e.pass_mark_percent,s.score,s.total,s.percentage,s.submitted_at,ROW_NUMBER() OVER(PARTITION BY s.exam_id ORDER BY s.submitted_at ASC)::int AS attempt_number,COUNT(*) OVER(PARTITION BY s.exam_id)::int AS attempt_count FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.student_user_id=$1 AND e.type='template' ORDER BY s.submitted_at DESC`,[u.id]);
+    res.json({results:rows.map(x=>{
+      if(x.result_visibility==='hidden')return {examId:x.exam_id,submitted:true,released:false};
+      const out={id:x.id,examId:x.exam_id,title:x.title,score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),passed:passedForExam(x,Number(x.percentage)),attemptNumber:Number(x.attempt_number),attemptCount:Number(x.attempt_count),submittedAt:Number(x.submitted_at),publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(x.public_result_token)):null};
+      if(x.result_visibility==='score_only')delete out.publicResultUrl;
+      return out;
+    })});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load results.'});}
+});
+app.get('/api/student/results/:id', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const {rows}=await pool.query(`SELECT s.id,s.exam_id,e.title,e.result_visibility,e.pass_mark_percent,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.id=$1 AND s.student_user_id=$2 AND e.type='template'`,[req.params.id,u.id]);
+    if(!rows[0])return res.status(404).json({error:'Result not found.'});
+    const r=rows[0];
+    if(r.result_visibility==='hidden')return res.json({submitted:true,released:false});
+    const base={submissionId:r.id,examId:r.exam_id,examTitle:r.title,score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),passed:passedForExam(r,Number(r.percentage)),submittedAt:Number(r.submitted_at)};
+    if(r.result_visibility==='score_only')return res.json(base);
+    res.json({...base,answers:r.answers_json,results:r.results_json});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});}
+});
+app.get('/api/student/exams/:examId/peers', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const exam=await getExam(req.params.examId,{loadContent:false});
+    if(!exam||exam.type!=='template')return res.status(404).json({error:'Exam not found.'});
+    if(exam.peers_visible===false||exam.result_visibility==='hidden')return res.status(403).json({error:'Peer comparison is not available for this exam.'});
+    const mine=await pool.query('SELECT id FROM exam_submissions WHERE exam_id=$1 AND student_user_id=$2 LIMIT 1',[exam.id,u.id]);
+    if(!mine.rows[0])return res.status(403).json({error:'You have no submission for this exam.'});
+    const ranked=await pool.query(`WITH best AS(
+      SELECT s.student_user_id,MAX(s.percentage) AS best_percentage,MAX(s.score) AS best_score,MAX(s.total) AS total,MIN(s.submitted_at) AS first_submitted_at,COUNT(*)::int AS attempts
+      FROM exam_submissions s WHERE s.exam_id=$1 AND s.student_user_id IS NOT NULL GROUP BY s.student_user_id
+    ),ordered AS(
+      SELECT b.*,RANK() OVER(ORDER BY b.best_percentage DESC,b.first_submitted_at ASC)::int AS rank FROM best b
+    )
+    SELECT o.rank,o.student_user_id,o.best_percentage,o.best_score,o.total,o.attempts,u.display_name,u.student_id AS class_name
+    FROM ordered o JOIN users u ON u.id=o.student_user_id ORDER BY o.rank ASC,o.first_submitted_at ASC LIMIT 200`,[exam.id]);
+    const attempts=await pool.query(`SELECT s.student_user_id,s.score,s.total,s.percentage,s.submitted_at,ROW_NUMBER() OVER(PARTITION BY s.student_user_id ORDER BY s.submitted_at ASC)::int AS attempt_number FROM exam_submissions s WHERE s.exam_id=$1 AND s.student_user_id IS NOT NULL ORDER BY s.student_user_id,s.submitted_at ASC`,[exam.id]);
+    const byUser=new Map();for(const x of attempts.rows){const a=byUser.get(x.student_user_id)||[];a.push({attemptNumber:Number(x.attempt_number),score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),submittedAt:Number(x.submitted_at)});byUser.set(x.student_user_id,a)}
+    let peers=ranked.rows.map(x=>({rank:Number(x.rank),displayName:x.display_name,className:x.class_name||null,bestScore:Number(x.best_score),total:Number(x.total),bestPercentage:Number(x.best_percentage),attempts:Number(x.attempts),isMe:x.student_user_id===u.id,attemptsList:byUser.get(x.student_user_id)||[]}));
+    let me=peers.find(x=>x.isMe)||null;
+    if(!me){
+      const mineRank=await pool.query(`SELECT rank,student_user_id,best_percentage,best_score,total,attempts,display_name,class_name FROM (
+        SELECT o.*,RANK() OVER(ORDER BY o.best_percentage DESC,o.first_submitted_at ASC)::int AS rank
+        FROM (SELECT s.student_user_id,MAX(s.percentage) AS best_percentage,MAX(s.score) AS best_score,MAX(s.total) AS total,MIN(s.submitted_at) AS first_submitted_at,COUNT(*)::int AS attempts,u.display_name,u.student_id AS class_name
+              FROM exam_submissions s JOIN users u ON u.id=s.student_user_id WHERE s.exam_id=$1 GROUP BY s.student_user_id,u.display_name,u.student_id) o
+      ) z WHERE student_user_id=$2 LIMIT 1`,[exam.id,u.id]);
+      if(mineRank.rows[0]){
+        const x=mineRank.rows[0];
+        me={rank:Number(x.rank),displayName:x.display_name,className:x.class_name||null,bestScore:Number(x.best_score),total:Number(x.total),bestPercentage:Number(x.best_percentage),attempts:Number(x.attempts),isMe:true,attemptsList:byUser.get(x.student_user_id)||[]};
+        peers=(peers.length>=200?peers.slice(0,199):peers).concat(me);
+      }
+    }
+    const totalMarks=parseQuestions(exam).reduce((sum,q)=>sum+(q.marks===undefined?1:Number(q.marks)||1),0);
+    res.json({exam:{id:exam.id,title:exam.title,totalMarks:Number(totalMarks.toFixed(2)),passMarkPercent:exam.pass_mark_percent==null?null:Number(exam.pass_mark_percent)},me:me?{rank:me.rank,bestPercentage:me.bestPercentage,attempts:me.attempts}:null,peers});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load peer results.'});}
+});
 app.get('/api/student/teachers', async(req,res)=>{ try{const u=await requireRole(req,res,'student');if(!u)return; const {rows}=await pool.query(`SELECT DISTINCT t.id,t.email,t.display_name FROM users t JOIN exams e ON e.owner_user_id=t.id JOIN exam_submissions s ON s.exam_id=e.id WHERE s.student_user_id=$1 AND t.role='teacher' ORDER BY t.display_name`,[u.id]); res.json({teachers:rows.map(x=>({id:x.id,email:x.email,displayName:x.display_name}))}); }catch(err){console.error(err);res.status(500).json({error:'Could not load teachers.'});} });
 app.get('/api/teacher/students', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT DISTINCT u.id,u.email,u.display_name,u.student_id FROM users u JOIN exam_submissions s ON s.student_user_id=u.id JOIN exams e ON e.id=s.exam_id WHERE e.owner_user_id=$1 ORDER BY u.display_name`,[u.id]);res.json({students:rows});}catch(err){console.error(err);res.status(500).json({error:'Could not load students.'});} });
 app.get('/api/teacher/students/:studentId', async(req,res)=>{
@@ -837,12 +875,12 @@ app.get('/api/teacher/students/:studentId', async(req,res)=>{
       LIMIT 1`,[studentId,u.id]);
     const st=student.rows[0];
     if(!st)return res.status(404).json({error:'Student not found.'});
-    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,s.score,s.total,s.percentage,s.submitted_at
+    const {rows}=await pool.query(`SELECT s.id,s.public_result_token,s.exam_id,e.title,e.pass_mark_percent,s.score,s.total,s.percentage,s.submitted_at
       FROM exam_submissions s
       JOIN exams e ON e.id=s.exam_id
       WHERE s.student_user_id=$1 AND e.owner_user_id=$2 AND e.type='template'
       ORDER BY s.submitted_at DESC`,[studentId,u.id]);
-    const results=rows.map(x=>({...x,score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),submittedAt:Number(x.submitted_at),publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null}));
+    const results=rows.map(x=>({...x,score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),passed:passedForExam(x,Number(x.percentage)),passMarkPercent:x.pass_mark_percent==null?null:Number(x.pass_mark_percent),submittedAt:Number(x.submitted_at),publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null}));
     const average=results.length ? Number((results.reduce((sum,x)=>sum+Number(x.percentage||0),0)/results.length).toFixed(2)) : 0;
     res.json({
       student:{id:st.id,email:st.email,displayName:st.display_name,studentId:st.student_id},
@@ -869,8 +907,7 @@ app.get('/api/teacher/students/:studentId/results/:submissionId', async(req,res)
     }
     res.json({
       submissionId:r.id,publicResultUrl:((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(r.public_result_token)}`),examId:r.exam_id,examTitle:r.title,
-      studentId:r.student_id,studentName:r.student_name,studentEmail:r.student_email,
-      score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),
+      studentId:r.student_id,studentName:r.student_name,studentEmail:r.student_email,      score:Number(r.score),total:Number(r.total),percentage:Number(r.percentage),
       answers:r.answers_json,results:r.results_json,submittedAt:Number(r.submitted_at)
     });
   }catch(err){console.error(err);res.status(500).json({error:'Could not load result.'});}
@@ -880,8 +917,7 @@ app.get('/api/health', (req, res) => res.json({ok:true, ts:Date.now(), version:A
 
 app.post('/api/teacher/b2-presign', async(req,res)=>{ try{
   const u=await requireRole(req,res,'teacher'); if(!u)return;
-  if(!b2Configured)return res.status(503).json({error:'B2 storage not configured.'});
-  const {contentType='application/pdf', examId}=req.body||{};
+  if(!b2Configured)return res.status(503).json({error:'B2 storage not configured.'});  const {contentType='application/pdf', examId}=req.body||{};
   if(!examId)return res.status(400).json({error:'examId required.'});
   const key='exams/'+examId+'/pdf-'+Date.now()+'.pdf';
   const cmd=new PutObjectCommand({Bucket:process.env.B2_BUCKET,Key:key,ContentType:contentType});
@@ -897,8 +933,7 @@ app.post('/api/teacher/b2-multipart-start', async(req,res)=>{ try{
   if(!examId)return res.status(400).json({error:'examId required.'});
   const key='exams/'+examId+'/pdf-'+Date.now()+'.pdf';
   const out=await b2.send(new CreateMultipartUploadCommand({Bucket:process.env.B2_BUCKET,Key:key,ContentType:contentType}));
-  res.json({uploadId:out.UploadId,key});
-}catch(err){console.error(err);res.status(500).json({error:'Could not start multipart upload.'});} });
+  res.json({uploadId:out.UploadId,key});}catch(err){console.error(err);res.status(500).json({error:'Could not start multipart upload.'});} });
 
 app.post('/api/teacher/b2-multipart-part', async(req,res)=>{ try{
   const u=await requireRole(req,res,'teacher'); if(!u)return;
@@ -927,51 +962,25 @@ app.post('/api/teacher/b2-multipart-abort', async(req,res)=>{ try{
   res.json({ok:true});
 }catch(err){res.status(500).json({error:'Could not abort.'});} });
 
-app.post('/exam/create', async(req, res) => {
+app.post('/exam/create', async(req,res)=>{
   try{
-    const user=await requireRole(req,res,'teacher'); if(!user)return;
-    const {title, studentPassword, durationMs, type='pdf', pdfDataUrl=null, questions=[], folderId=null, allowRetake=false, maxAttempts=null}=req.body||{};
-    const safeAllowRetake=Boolean(allowRetake);
-    const safeMaxAttempts=maxAttempts===null||maxAttempts===''||maxAttempts===undefined?null:Number(maxAttempts);
-    if(safeMaxAttempts!==null && (!Number.isInteger(safeMaxAttempts)||safeMaxAttempts<1)) return res.status(400).json({error:'maxAttempts must be a positive integer or null'});
-    if(!title || typeof title !== 'string') return res.status(400).json({error:'title is required'});
-    if(!studentPassword || typeof studentPassword !== 'string') return res.status(400).json({error:'studentPassword is required'});
-    if(typeof durationMs !== 'number' || durationMs<=0) return res.status(400).json({error:'durationMs must be a positive number'});
-    if(!['pdf', 'template'].includes(type)) return res.status(400).json({error:'type must be pdf or template'});
-    if(type === 'pdf' && !pdfDataUrl && !req.body?.b2Key) return res.status(400).json({error:'pdfDataUrl or b2Key required for PDF exams'});
-    if(type === 'template'){
-      if(!Array.isArray(questions)||!questions.length) return res.status(400).json({error:'template exams require at least one question'});
-      for(const q of questions){
-        if(!q || !['mcq', 'tf'].includes(q.type) || typeof q.text !== 'string' || !q.text.trim()) return res.status(400).json({error:'invalid question'});
-        if(q.type === 'mcq' && (!Array.isArray(q.options)||q.options.length !== 4||q.options.some(o => typeof o !== 'string'||!o.trim())||!Number.isInteger(q.answer)||q.answer<0||q.answer>3)) return res.status(400).json({error:'invalid MCQ question'});
-        if(q.type === 'tf' && q.answer !== 'true' && q.answer !== 'false') return res.status(400).json({error:'invalid True/False question'});
-      }
-    }
+    const user=await requireRole(req,res,'teacher');if(!user)return;
+    const b=req.body||{},title=b.title,studentPassword=b.studentPassword,durationMs=b.durationMs,type=b.type||'pdf',pdfDataUrl=b.pdfDataUrl||null,questions=b.questions||[],folderId=b.folderId??null;
+    const allowRetake=Boolean(b.allowRetake),maxAttempts=b.maxAttempts===null||b.maxAttempts===''||b.maxAttempts===undefined?null:Number(b.maxAttempts);
+    const negativeMarking=normalizeNegativeMarking(b.negativeMarking,0),passMarkPercent=normalizePassMark(b.passMarkPercent,null),resultVisibility=normalizeResultVisibility(b.resultVisibility,'instant'),peersVisible=b.peersVisible===undefined?true:Boolean(b.peersVisible);
+    if(maxAttempts!==null&&(!Number.isInteger(maxAttempts)||maxAttempts<1))return res.status(400).json({error:'maxAttempts must be a positive integer or null'});
+    if(!title||typeof title!=='string')return res.status(400).json({error:'title is required'});if(!studentPassword||typeof studentPassword!=='string')return res.status(400).json({error:'studentPassword is required'});if(typeof durationMs!=='number'||durationMs<=0)return res.status(400).json({error:'durationMs must be a positive number'});if(!['pdf','template'].includes(type))return res.status(400).json({error:'type must be pdf or template'});
+    if(type==='pdf'&&!pdfDataUrl&&!b.b2Key)return res.status(400).json({error:'pdfDataUrl or b2Key required for PDF exams'});
+    let normalizedQuestions=[];
+    if(type==='template'){try{normalizedQuestions=normalizeTemplateQuestions(questions)}catch(err){return res.status(400).json({error:err.message})}}
     let safeFolderId=null;
-    if(folderId!==null && folderId!==''){
-      const folder=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[String(folderId),user.id]);
-      if(!folder.rows[0])return res.status(400).json({error:'Folder not found.'});
-      safeFolderId=String(folderId);
-    }
+    if(folderId!==null&&folderId!==''){const f=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[String(folderId),user.id]);if(!f.rows[0])return res.status(400).json({error:'Folder not found.'});safeFolderId=String(folderId)}
     const examId='exam_'+crypto.randomBytes(12).toString('hex');
-    let contentObjectKey;
-    if(type==='pdf'){
-      if(req.body?.b2Key){
-        // PDF already uploaded directly to B2 by the browser — just use the key
-        contentObjectKey=req.body.b2Key;
-      } else {
-        // Fallback: small PDFs sent as base64 (legacy / small files)
-        contentObjectKey=await uploadPdfToB2(examId,pdfDataUrl);
-      }
-    } else {
-      contentObjectKey=await uploadTemplateToB2(examId,questions);
-    }
-    await pool.query(`INSERT INTO exams(id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,[examId,title,type,null,null,contentObjectKey,null,studentPassword,durationMs,Date.now(),user.id,safeFolderId,safeAllowRetake,safeMaxAttempts]);
-    const baseUrl=process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({examId,url:`${baseUrl}/exam/${examId}`});
-  }catch(error){ console.error('Create exam error:', error); res.status(500).json({error:'Failed to create exam'}); }
+    const contentObjectKey=type==='pdf'?(b.b2Key?String(b.b2Key):await uploadPdfToB2(examId,pdfDataUrl)):await uploadTemplateToB2(examId,normalizedQuestions);
+    await pool.query(`INSERT INTO exams(id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,[examId,title,type,null,null,contentObjectKey,null,studentPassword,durationMs,Date.now(),user.id,safeFolderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,null,peersVisible]);
+    const baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');res.json({examId,url:baseUrl+'/exam/'+examId});
+  }catch(error){console.error('Create exam error:',error);res.status(400).json({error:error.message||'Failed to create exam'});}
 });
-
 app.get('/api/exam/:id', async(req, res) => {
   try{
     const exam=await getExam(req.params.id,{loadContent:false});
@@ -1045,6 +1054,7 @@ app.post('/api/exam/:id/session', async(req, res) => {
   try{
     const exam=await getExam(req.params.id,{loadContent:false});
     if(!exam) return res.status(404).json({error:'Exam not found'});
+    if(exam.archived_at)return res.status(403).json({error:'This exam is archived.'});
     if(exam.type==='template') await hydrateExamContent(exam);
 
     const body=req.body||{};
@@ -1196,9 +1206,7 @@ app.post('/api/exam/:id/progress', async(req,res) => {
     const safeProgress={
       answers:progress.answers && typeof progress.answers==='object' ? progress.answers : {},
       currentQuestion:Number.isInteger(Number(progress.currentQuestion)) ? Math.max(0,Number(progress.currentQuestion)) : 0,
-      pdfPage:Number.isInteger(Number(progress.pdfPage)) ? Math.max(1,Number(progress.pdfPage)) : 1,
-      pdfScrollRatio:Number.isFinite(Number(progress.pdfScrollRatio)) ? Math.min(1,Math.max(0,Number(progress.pdfScrollRatio))) : 0
-    };
+      pdfPage:Number.isInteger(Number(progress.pdfPage)) ? Math.max(1,Number(progress.pdfPage)) : 1,      pdfScrollRatio:Number.isFinite(Number(progress.pdfScrollRatio)) ? Math.min(1,Math.max(0,Number(progress.pdfScrollRatio))) : 0    };
 
     await pool.query(
       'UPDATE exam_sessions SET progress_json=$1 WHERE token=$2',
@@ -1207,88 +1215,37 @@ app.post('/api/exam/:id/progress', async(req,res) => {
     return res.json({ok:true,progress:safeProgress});
   }catch(error){
     console.error('Save exam progress error:',error);
-    res.status(500).json({error:'Could not save exam progress'});
-  }
+    res.status(500).json({error:'Could not save exam progress'});  }
 });
 
-app.post('/api/exam/:id/finish', async(req,res) => {
+app.post('/api/exam/:id/finish', async(req,res)=>{
   try{
-    const exam=await getExam(req.params.id,{loadContent:false});
-    if(!exam) return res.status(404).json({error:'Exam not found'});
-    if(exam.type==='template') await hydrateExamContent(exam);
-
-    const authUser=await getAuthUser(req);
-    if(!authUser || authUser.role!=='student'){
-      return res.status(401).json({error:'Student account login is required.'});
-    }
-
+    const exam=await getExam(req.params.id,{loadContent:false});if(!exam)return res.status(404).json({error:'Exam not found'});if(exam.type==='template')await hydrateExamContent(exam);
+    const authUser=await getAuthUser(req);if(!authUser||authUser.role!=='student')return res.status(401).json({error:'Student account login is required.'});
     const finishToken=typeof req.body?.sessionToken==='string'?req.body.sessionToken.trim():'';
-    if(!finishToken) return res.status(400).json({error:'sessionToken is required'});
-
-    const existing=await pool.query(
-      `SELECT id,public_result_token,score,total,percentage,answers_json,results_json,submitted_at
-       FROM exam_submissions WHERE session_token=$1 AND exam_id=$2`,
-      [finishToken,exam.id]
-    );
-    if(existing.rows[0]){
-      const x=existing.rows[0];
-      return res.json({
-        submissionId:x.id,
-        publicResultToken:x.public_result_token||null,
-        publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||`${req.protocol}://${req.get('host')}`)+`/result/${encodeURIComponent(x.public_result_token)}`):null,
-        score:x.score,total:x.total,percentage:Number(x.percentage),
-        answers:x.answers_json,results:x.results_json,submittedAt:Number(x.submitted_at)
-      });
-    }
-
-    const sessionResult=await pool.query(
-      `SELECT token,student_id,student_name,student_user_id,end_at,finished_at
-       FROM exam_sessions WHERE token=$1 AND exam_id=$2`,
-      [finishToken,exam.id]
-    );
-    const session=sessionResult.rows[0];
-    if(!session) return res.status(404).json({error:'Session not found'});
-    if(session.student_user_id && session.student_user_id!==authUser.id){
-      return res.status(403).json({error:'This exam attempt belongs to another student account.'});
-    }
-    if(!session.student_user_id){
-      await pool.query('UPDATE exam_sessions SET student_user_id=$1 WHERE token=$2',[authUser.id,session.token]);
-      session.student_user_id=authUser.id;
-    }
-    if(session.finished_at) return res.status(409).json({error:'This attempt is already closed.'});
-
-    const answers=req.body?.answers && typeof req.body.answers==='object'?req.body.answers:{};
-    const submittedAt=Date.now();
-
+    if(!finishToken)return res.status(400).json({error:'sessionToken is required'});
+    const existing=await pool.query('SELECT s.id,s.public_result_token,s.score,s.total,s.percentage,s.answers_json,s.results_json,s.submitted_at FROM exam_submissions s WHERE s.session_token=$1 AND s.exam_id=$2',[finishToken,exam.id]);
+    if(existing.rows[0]){const x=existing.rows[0];return res.json(visibleResultPayload(exam,x,{submissionId:x.id,publicResultToken:x.public_result_token||null,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(x.public_result_token)):null,answers:x.answers_json,results:x.results_json,submittedAt:Number(x.submitted_at)}))}
+    const sr=await pool.query('SELECT token,student_id,student_name,student_user_id,end_at,finished_at FROM exam_sessions WHERE token=$1 AND exam_id=$2',[finishToken,exam.id]),session=sr.rows[0];
+    if(!session)return res.status(404).json({error:'Session not found'});if(session.student_user_id&&session.student_user_id!==authUser.id)return res.status(403).json({error:'This exam attempt belongs to another student account.'});
+    if(!session.student_user_id){await pool.query('UPDATE exam_sessions SET student_user_id=$1 WHERE token=$2',[authUser.id,session.token]);session.student_user_id=authUser.id}
+    if(session.finished_at)return res.status(409).json({error:'This attempt is already closed.'});
+    const answers=req.body?.answers&&typeof req.body.answers==='object'?req.body.answers:{},submittedAt=Date.now();
     if(exam.type==='pdf'){
       const submissionId='sub_'+crypto.randomBytes(12).toString('hex');
-      await pool.query(
-        `INSERT INTO exam_submissions(id,exam_id,session_token,student_id,student_name,answers_json,results_json,score,total,percentage,submitted_at,student_user_id,public_result_token)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL)`,
-        [submissionId,exam.id,finishToken,session.student_id,session.student_name,'{}','[]',0,0,0,submittedAt,session.student_user_id]
-      );
-      await pool.query('UPDATE exam_sessions SET finished_at=$1 WHERE token=$2',[submittedAt,finishToken]);
-      return res.json({submissionId,submittedAt,pdf:true});
+      await pool.query(`INSERT INTO exam_submissions(id,exam_id,session_token,student_id,student_name,answers_json,results_json,score,total,percentage,submitted_at,student_user_id,public_result_token) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL) ON CONFLICT(session_token) DO NOTHING`,[submissionId,exam.id,finishToken,session.student_id,session.student_name,'{}','[]',0,0,0,submittedAt,session.student_user_id]);
+      await pool.query('UPDATE exam_sessions SET finished_at=$1 WHERE token=$2',[submittedAt,finishToken]);return res.json({submissionId,submittedAt,pdf:true});
     }
-
-    const graded=gradeExam(exam,answers);
-    const submissionId='sub_'+crypto.randomBytes(12).toString('hex');
-    const publicResultToken=makeToken();
-
-    await pool.query(
-      `INSERT INTO exam_submissions(id,exam_id,session_token,student_id,student_name,answers_json,results_json,score,total,percentage,submitted_at,student_user_id,public_result_token)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [submissionId,exam.id,finishToken,session.student_id,session.student_name,JSON.stringify(answers),JSON.stringify(graded.results),graded.score,graded.total,graded.percentage,submittedAt,session.student_user_id,publicResultToken]
-    );
+    const graded=gradeExam(exam,answers),submissionId='sub_'+crypto.randomBytes(12).toString('hex'),publicResultToken=makeToken();
+    const inserted=await pool.query(`INSERT INTO exam_submissions(id,exam_id,session_token,student_id,student_name,answers_json,results_json,score,total,percentage,submitted_at,student_user_id,public_result_token) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(session_token) DO NOTHING RETURNING id,public_result_token,score,total,percentage,answers_json,results_json,submitted_at`,[submissionId,exam.id,finishToken,session.student_id,session.student_name,JSON.stringify(answers),JSON.stringify(graded.results),graded.score,graded.total,graded.percentage,submittedAt,session.student_user_id,publicResultToken]);
     await pool.query('UPDATE exam_sessions SET finished_at=$1 WHERE token=$2',[submittedAt,finishToken]);
-
-    res.json({submissionId,...graded,answers,submittedAt});
-  }catch(error){
-    console.error('Finish exam error:',error);
-    res.status(500).json({error:'Failed to submit exam'});
-  }
+    if(!inserted.rows[0]){
+      const x=(await pool.query('SELECT id,public_result_token,score,total,percentage,answers_json,results_json,submitted_at FROM exam_submissions WHERE session_token=$1',[finishToken])).rows[0];
+      if(x)return res.json(visibleResultPayload(exam,x,{submissionId:x.id,publicResultToken:x.public_result_token||null,publicResultUrl:x.public_result_token?((process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(x.public_result_token)):null,answers:x.answers_json,results:x.results_json,submittedAt:Number(x.submitted_at)}));
+    }
+    return res.json(visibleResultPayload(exam,graded,{submissionId,publicResultToken,publicResultUrl:(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/result/'+encodeURIComponent(publicResultToken),answers,results:graded.results,submittedAt}));
+  }catch(error){console.error('Finish exam error:',error);res.status(500).json({error:'Failed to submit exam'});}
 });
-
 app.get('/api/exam/:id/attempts', async(req,res) => {
   try{
     const authUser=await getAuthUser(req);
@@ -1301,42 +1258,25 @@ app.get('/api/exam/:id/attempts', async(req,res) => {
   }catch(err){console.error(err);res.status(500).json({error:'Could not load attempts.'});}
 });
 
-app.get('/api/exam/:id/result/:token', async(req, res) => {
+app.get('/api/exam/:id/result/:token', async(req,res)=>{
   try{
-    const authUser=await getAuthUser(req);
-    if(!authUser || authUser.role!=='student') return res.status(401).json({error:'Student account login is required.'});
-    const {rows}=await pool.query(`SELECT s.id,s.student_id,s.student_name,s.answers_json,s.results_json,s.score,s.total,s.percentage,s.submitted_at,s.student_user_id,e.type FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.exam_id=$1 AND s.session_token=$2 AND e.type='template'`,[req.params.id,req.params.token]);
-    const s=rows[0]; if(!s) return res.status(404).json({error:'Result not found'});
-    if(s.student_user_id && s.student_user_id!==authUser.id) return res.status(403).json({error:'This result belongs to another student account.'});
-    res.json({submissionId:s.id, studentId:s.student_id, studentName:s.student_name, answers:s.answers_json, results:s.results_json, score:s.score, total:s.total, percentage:Number(s.percentage), submittedAt:Number(s.submitted_at)});
+    const u=await getAuthUser(req);if(!u||u.role!=='student')return res.status(401).json({error:'Student account login is required.'});
+    const {rows}=await pool.query(`SELECT s.id,s.student_id,s.student_name,s.answers_json,s.results_json,s.score,s.total,s.percentage,s.submitted_at,s.student_user_id,e.pass_mark_percent,e.result_visibility,e.type FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.exam_id=$1 AND s.session_token=$2 AND e.type='template'`,[req.params.id,req.params.token]);
+    const s=rows[0];if(!s)return res.status(404).json({error:'Result not found'});if(s.student_user_id&&s.student_user_id!==u.id)return res.status(403).json({error:'This result belongs to another student account.'});
+    res.json(visibleResultPayload(s,s,{submissionId:s.id,studentId:s.student_id,studentName:s.student_name,answers:s.answers_json,results:s.results_json,submittedAt:Number(s.submitted_at)}));
   }catch(error){console.error(error);res.status(500).json({error:'Failed to load result'});}
 });
 
-app.get('/result/:publicToken', async(req, res) => {
+app.get('/result/:publicToken', async(req,res)=>{
   try{
-    const {rows}=await pool.query(`
-      SELECT s.id,s.student_id,s.student_name,s.score,s.total,s.percentage,s.results_json,s.submitted_at,
-             ROW_NUMBER() OVER (PARTITION BY s.student_user_id ORDER BY s.submitted_at ASC)::int AS attempt_number,
-             COUNT(*) OVER (PARTITION BY s.student_user_id)::int AS attempt_count,
-             u.email AS student_email,e.title AS exam_title
-      FROM exam_submissions s
-      JOIN exams e ON e.id=s.exam_id
-      LEFT JOIN users u ON u.id=s.student_user_id
-      WHERE s.public_result_token=$1
-      LIMIT 1
-    `,[req.params.publicToken]);
-    const s=rows[0];
-    if(!s) return res.status(404).type('html').send('<h1>Result not found</h1>');
-    const results=Array.isArray(s.results_json)?s.results_json:[];
-    const resultHtml=results.map((q,i)=>{
-      const cls=q.correct?'correct':'wrong';
-      return '<article class="q '+cls+'"><div class="status">'+(q.correct?'✓ CORRECT':'✕ INCORRECT')+'</div><h3>'+escapeHtml(q.questionNumber||i+1)+'. '+escapeHtml(q.question||'Question')+'</h3><p><b>Student answered:</b> '+escapeHtml(q.yourAnswer||'Unanswered')+'</p><p><b>Correct answer:</b> '+escapeHtml(q.correctAnswer||'—')+'</p></article>';
-    }).join('');
-    const emailRow='<div><span>Student ID</span><strong>'+escapeHtml(s.student_id||'—')+'</strong></div><div><span>Email</span><strong>'+escapeHtml(s.student_email||'—')+'</strong></div>';
-    res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Result — ${escapeHtml(s.exam_title)}</title>
-<style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#171615;background:#f2f1ef}*{box-sizing:border-box}body{margin:0;padding:28px}.wrap{max-width:900px;margin:0 auto}.head,.q{background:#fff;border:1px solid #ddd;border-radius:16px;padding:22px;margin-bottom:14px;box-shadow:0 6px 24px #00000008}.head h1{margin:0 0 8px;font-size:28px}.muted{color:#666}.meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:18px}.meta div{background:#f7f7f7;border-radius:10px;padding:12px}.meta span{display:block;color:#777;font-size:12px}.meta strong{display:block;margin-top:4px}.score{font-size:42px;font-weight:900;margin-top:12px}.q.correct{border-left:5px solid #18864b}.q.wrong{border-left:5px solid #c43d3d}.status{font-weight:800;margin-bottom:8px}.correct .status{color:#18864b}.wrong .status{color:#c43d3d}.q h3{margin:0 0 12px;line-height:1.4}.q p{line-height:1.5}.footer{color:#777;font-size:12px;margin-top:18px}@media(max-width:650px){body{padding:12px}.meta{grid-template-columns:1fr}.score{font-size:34px}}
-</style></head><body><main class="wrap"><section class="head"><h1>${escapeHtml(s.exam_title)}</h1><div class="muted">Shared exam result</div><div class="score">${Number(s.score)||0} / ${Number(s.total)||0}</div><div class="muted">${Number(s.percentage||0).toFixed(1)}% · Attempt ${Number(s.attempt_number)||1} of ${Number(s.attempt_count)||1} · submitted ${new Date(Number(s.submitted_at)).toLocaleString()}</div><div class="meta"><div><span>Student name</span><strong>${escapeHtml(s.student_name)}</strong></div>${emailRow}</div></section><section>${resultHtml||'<div class="q"><p>No question-level result data is available.</p></div>'}</section><div class="footer">Anyone with this link can view this shared result.</div></main></body></html>`);
+    const {rows}=await pool.query(`SELECT s.id,s.student_id,s.student_name,s.score,s.total,s.percentage,s.results_json,s.submitted_at,e.title AS exam_title,e.result_visibility,e.pass_mark_percent,u.email AS student_email FROM exam_submissions s JOIN exams e ON e.id=s.exam_id LEFT JOIN users u ON u.id=s.student_user_id WHERE s.public_result_token=$1 LIMIT 1`,[req.params.publicToken]);
+    const s=rows[0];if(!s)return res.status(404).type('html').send('<h1>Result not found</h1>');
+    if(s.result_visibility==='hidden')return res.type('html').send('<!doctype html><html><body style="font-family:system-ui;padding:32px;text-align:center"><h1>Result not released</h1><p>This result has been submitted but is not available yet.</p></body></html>');
+    const results=s.result_visibility==='instant'&&Array.isArray(s.results_json)?s.results_json:[];
+    const resultHtml=results.map((q,i)=>'<article class="q '+(q.correct?'correct':'wrong')+'"><div class="status">'+(q.correct?'✓ CORRECT':'✕ INCORRECT')+'</div><h3>'+escapeHtml(q.questionNumber||i+1)+'. '+escapeHtml(q.question||'Question')+'</h3><p><b>Student answered:</b> '+escapeHtml(q.yourAnswer||'Unanswered')+'</p><p><b>Correct answer:</b> '+escapeHtml(q.correctAnswer||'—')+'</p></article>').join('');
+    const pass=passedForExam(s,Number(s.percentage));
+    const emailRow='<div><b>Student ID</b><div>'+escapeHtml(s.student_id||'—')+'</div></div><div><b>Email</b><div>'+escapeHtml(s.student_email||'—')+'</div></div>';
+    res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Result — ${escapeHtml(s.exam_title)}</title><style>body{font-family:system-ui;background:#f2f1ef;color:#171615;padding:28px}.wrap{max-width:900px;margin:auto}.head,.q{background:#fff;border:1px solid #ddd;border-radius:16px;padding:22px;margin-bottom:14px}.score{font-size:42px;font-weight:900;margin-top:12px}.muted{color:#666}.status{font-weight:800}.correct .status{color:#18864b}.wrong .status{color:#c43d3d}</style></head><body><main class="wrap"><section class="head"><h1>${escapeHtml(s.exam_title)}</h1><div class="muted">Shared exam result</div><div class="score">${Number(s.score)||0} / ${Number(s.total)||0}</div><div class="muted">${Number(s.percentage||0).toFixed(2)}% · submitted ${new Date(Number(s.submitted_at)).toLocaleString()}</div><p><b>${pass===null?'':(pass?'Passed':'Not passed')}</b></p><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px"><div>${emailRow}</div></div></section><section>${resultHtml||'<div class="q"><p>Only the score is available for this result.</p></div>'}</section></main></body></html>`);
   }catch(err){console.error(err);res.status(500).type('html').send('<h1>Could not load result</h1>');}
 });
 
@@ -1497,8 +1437,7 @@ app.get('/exam/:id', async(req, res) => {
     return account?[account]:[];
   }
 
-  async function savedDeviceAccount() {
-    const rows=await savedAccounts();
+  async function savedDeviceAccount() {    const rows=await savedAccounts();
     return rows[0]||null;
   }
 
@@ -1566,8 +1505,7 @@ app.get('/exam/:id', async(req, res) => {
     return h?String(h).padStart(2, '0')+':'+String(m).padStart(2, '0')+':'+String(x).padStart(2, '0'):String(m).padStart(2, '0')+':'+String(x).padStart(2, '0')
   }
   function esc(v) {
-    return String(v??'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')}
-let progressSaveChain=Promise.resolve();
+    return String(v??'').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')}let progressSaveChain=Promise.resolve();
 let progressSaveTimer=null;
 
 function sessionProgressSnapshot(extra={}){
@@ -1576,8 +1514,7 @@ function sessionProgressSnapshot(extra={}){
     answers:session?.answers&&typeof session.answers==='object'?session.answers:{},
     currentQuestion:Number.isInteger(Number(session?.currentQuestion))?Math.max(0,Number(session.currentQuestion)):0,
     pdfPage:Number.isInteger(Number(session?.pdfPage))?Math.max(1,Number(session.pdfPage)):1,
-    pdfScrollRatio:Number.isFinite(Number(session?.pdfScrollRatio))?Math.min(1,Math.max(0,Number(session.pdfScrollRatio))):0,
-    ...existing,
+    pdfScrollRatio:Number.isFinite(Number(session?.pdfScrollRatio))?Math.min(1,Math.max(0,Number(session.pdfScrollRatio))):0,    ...existing,
     ...extra
   };
   p.answers=session?.answers&&typeof session.answers==='object'?session.answers:{};
@@ -1798,7 +1735,6 @@ async function renderPDF(pdfUrl){
       updatePdfReaderPosition();
     });
   }
-
   async function renderPage(pageNumber){
     const index=pageNumber-1;
     const slot=slots[index];
@@ -1868,8 +1804,7 @@ async function renderPDF(pdfUrl){
   const resumePdfPage=Math.min(pdf.numPages,Math.max(1,Number(session.pdfPage)||1));
   const resumePdfRatio=Math.min(1,Math.max(0,Number(session.pdfScrollRatio)||0));
   requestAnimationFrame(()=>{
-    const target=slots[resumePdfPage-1];
-    if(target){
+    const target=slots[resumePdfPage-1];    if(target){
       paper.scrollTop=target.offsetTop;
     }else{
       paper.scrollTop=Math.max(0,(paper.scrollHeight-paper.clientHeight)*resumePdfRatio);
@@ -1878,7 +1813,6 @@ async function renderPDF(pdfUrl){
   });
 
   paper.addEventListener('scroll',updatePdfReaderPosition,{passive:true});
-
   // Seekable PDF scrollbar: grab the thumb and drag it to jump through the
   // document, or click anywhere on the track to jump there.
   const scrollTrack=thumb.parentElement;
@@ -2097,8 +2031,7 @@ async function useSavedDeviceAccount(){
   }catch(e){
     console.error('[Acadex] Remembered student account restore failed:',e);
     studentAuthToken='';
-    return false;
-  }finally{savedAccountBusy=false}
+    return false;  }finally{savedAccountBusy=false}
 }
 async function tryAutoResume(){
   try{
@@ -2170,9 +2103,5 @@ $('examStep').addEventListener('submit',e=>{e.preventDefault();enter()});
 });
 
 initDatabase().then(()=>{const PORT=process.env.PORT||3000;app.listen(PORT,()=>console.log(`Exam backend listening on port ${PORT}`));}).catch(error=>{console.error('Database initialization failed:',error);process.exit(1)});
-
-
-
-
 
 
