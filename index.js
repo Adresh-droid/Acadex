@@ -41,17 +41,17 @@ async function getPdfDataUrlFromB2(key){
 }
 async function deletePdfFromB2(key){
   if(!key||!b2)return;
-  let KeyMarker;
-  let VersionIdMarker;
-  do{
+  // B2 keeps object versions. Do not paginate while deleting: removing items
+  // changes the version listing and can cause cursor-based pagination to skip
+  // versions. Re-list from the beginning until no version/delete-marker remains.
+  for(let pass=0;pass<100;pass++){
     const page=await b2.send(new ListObjectVersionsCommand({
       Bucket:process.env.B2_BUCKET,
-      Prefix:key,
-      ...(KeyMarker?{KeyMarker}:{}),
-      ...(VersionIdMarker?{VersionIdMarker}:{})
+      Prefix:key
     }));
     const versions=[...(page.Versions||[]),...(page.DeleteMarkers||[])]
       .filter(v=>v.Key===key&&v.VersionId);
+    if(!versions.length) return;
     for(const version of versions){
       await b2.send(new DeleteObjectCommand({
         Bucket:process.env.B2_BUCKET,
@@ -59,9 +59,8 @@ async function deletePdfFromB2(key){
         VersionId:version.VersionId
       }));
     }
-    KeyMarker=page.IsTruncated?page.NextKeyMarker:undefined;
-    VersionIdMarker=page.IsTruncated?page.NextVersionIdMarker:undefined;
-  }while(KeyMarker||VersionIdMarker);
+  }
+  throw new Error('B2 object cleanup did not finish for '+key);
 }
 async function uploadTemplateToB2(examId,questions){
   const key=`exams/${examId}.json`;
