@@ -4481,6 +4481,65 @@ window.acadexSetIcon = function(el, name, preserveLabel=false) {
 }
 </style>
 
+<style id="acadex-tablet-nav-fix">
+/* Tablet navigation: the desktop sidebar disappears at <=900px, so tablets
+   need the same bottom navigation affordance as phones without inheriting
+   the phone-only layout rules. */
+@media (min-width:601px) and (max-width:900px){
+  .sidebar{display:none!important;}
+  .mobile-nav{
+    position:fixed!important;
+    display:grid!important;
+    grid-template-columns:repeat(4,minmax(0,1fr))!important;
+    left:12px!important;
+    right:12px!important;
+    bottom:12px!important;
+    width:auto!important;
+    height:72px!important;
+    min-height:72px!important;
+    padding:7px!important;
+    gap:4px!important;
+    z-index:3000!important;
+    border:1px solid var(--line)!important;
+    border-radius:16px!important;
+    background:var(--bg-elev)!important;
+    box-shadow:var(--shadow-lg)!important;
+    box-sizing:border-box!important;
+  }
+  .mobile-nav button{
+    min-width:0!important;
+    width:100%!important;
+    height:58px!important;
+    padding:6px 4px!important;
+    border:0!important;
+    border-radius:10px!important;
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:center!important;
+    justify-content:center!important;
+    gap:4px!important;
+    background:transparent!important;
+    color:var(--ink-faint)!important;
+    font:700 .72rem/1 Inter,sans-serif!important;
+    white-space:nowrap!important;
+  }
+  .mobile-nav button.active{background:var(--accent-soft)!important;color:var(--accent)!important}
+  .mobile-nav-icon{
+    width:22px!important;height:22px!important;min-width:22px!important;min-height:22px!important;
+    display:grid!important;place-items:center!important;margin:0!important;font-size:18px!important;
+    line-height:1!important;flex:0 0 22px!important;
+  }
+  .mobile-nav-icon .acadex-svg-icon{width:19px!important;height:19px!important}
+  .mobile-nav-label{
+    display:block!important;max-width:100%!important;overflow:hidden!important;
+    text-overflow:ellipsis!important;font:700 .7rem/1 Inter,sans-serif!important;
+  }
+  .content-scroll{
+    padding-bottom:110px!important;
+    scroll-padding-bottom:110px!important;
+  }
+}
+</style>
 </body></html>
 
 
