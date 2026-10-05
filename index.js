@@ -298,7 +298,6 @@ app.get('/app/acadex-app-7f3c9e21/main', (req,res) => {
     res.status(500).send('Acadex app is unavailable.');
   }
 });
-
 function makeToken() {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -597,8 +596,7 @@ app.delete('/api/auth/account', async(req,res)=>{
     if(!raw)return res.status(401).json({error:'Not logged in.'});
     const u=await getAuthUser(req);
     if(!u)return res.status(401).json({error:'Not logged in.'});
-    const password=String(req.body?.password||'');
-    if(!password)return res.status(400).json({error:'Password is required.'});
+    const password=String(req.body?.password||'');    if(!password)return res.status(400).json({error:'Password is required.'});
     const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);
     if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
 
@@ -667,11 +665,12 @@ app.get('/api/teacher/exams', async(req,res)=>{try{
   const u=await requireRole(req,res,'teacher');if(!u)return;
   const {rows}=await pool.query(`
     SELECT e.id,e.title,e.type,e.duration_ms,e.created_at,e.folder_id,f.name AS folder_name,
-      COUNT(DISTINCT es.token)::int AS attempts,COUNT(DISTINCT s.id)::int AS submitted_count,
-      AVG(s.percentage) FILTER(WHERE s.id IS NOT NULL) AS avg_percentage,
+      (SELECT COUNT(*)::int FROM exam_sessions es WHERE es.exam_id=e.id) AS attempts,
+      (SELECT COUNT(*)::int FROM exam_submissions s WHERE s.exam_id=e.id) AS submitted_count,
+      (SELECT AVG(s.percentage) FROM exam_submissions s WHERE s.exam_id=e.id) AS avg_percentage,
       e.pass_mark_percent,e.negative_marking,e.result_visibility,e.peers_visible,e.archived_at
-    FROM exams e LEFT JOIN exam_sessions es ON es.exam_id=e.id LEFT JOIN exam_folders f ON f.id=e.folder_id LEFT JOIN exam_submissions s ON s.exam_id=e.id
-    WHERE e.owner_user_id=$1 GROUP BY e.id,f.name ORDER BY e.created_at DESC
+    FROM exams e LEFT JOIN exam_folders f ON f.id=e.folder_id
+    WHERE e.owner_user_id=$1 ORDER BY e.created_at DESC
   `,[u.id]);
   res.json({exams:rows.map(x=>({...x,durationMs:Number(x.duration_ms),createdAt:Number(x.created_at),attempts:Number(x.attempts||0),submittedCount:Number(x.submitted_count||0),avgPercentage:x.avg_percentage===null?null:Number(Number(x.avg_percentage).toFixed(2)),passMarkPercent:x.pass_mark_percent==null?null:Number(x.pass_mark_percent),negativeMarking:Number(x.negative_marking||0),resultVisibility:x.result_visibility||'instant',peersVisible:x.peers_visible!==false,archived:Boolean(x.archived_at),archivedAt:x.archived_at==null?null:Number(x.archived_at)}))});
 }catch(err){console.error(err);res.status(500).json({error:'Could not load exams.'});}});
@@ -834,8 +833,20 @@ app.get('/api/student/exams/:examId/peers', async(req,res)=>{
     FROM ordered o JOIN users u ON u.id=o.student_user_id ORDER BY o.rank ASC,o.first_submitted_at ASC LIMIT 200`,[exam.id]);
     const attempts=await pool.query(`SELECT s.student_user_id,s.score,s.total,s.percentage,s.submitted_at,ROW_NUMBER() OVER(PARTITION BY s.student_user_id ORDER BY s.submitted_at ASC)::int AS attempt_number FROM exam_submissions s WHERE s.exam_id=$1 AND s.student_user_id IS NOT NULL ORDER BY s.student_user_id,s.submitted_at ASC`,[exam.id]);
     const byUser=new Map();for(const x of attempts.rows){const a=byUser.get(x.student_user_id)||[];a.push({attemptNumber:Number(x.attempt_number),score:Number(x.score),total:Number(x.total),percentage:Number(x.percentage),submittedAt:Number(x.submitted_at)});byUser.set(x.student_user_id,a)}
-    const peers=ranked.rows.map(x=>({rank:Number(x.rank),displayName:x.display_name,className:x.class_name||null,bestScore:Number(x.best_score),total:Number(x.total),bestPercentage:Number(x.best_percentage),attempts:Number(x.attempts),isMe:x.student_user_id===u.id,attemptsList:byUser.get(x.student_user_id)||[]}));
-    const me=peers.find(x=>x.isMe)||null;
+    let peers=ranked.rows.map(x=>({rank:Number(x.rank),displayName:x.display_name,className:x.class_name||null,bestScore:Number(x.best_score),total:Number(x.total),bestPercentage:Number(x.best_percentage),attempts:Number(x.attempts),isMe:x.student_user_id===u.id,attemptsList:byUser.get(x.student_user_id)||[]}));
+    let me=peers.find(x=>x.isMe)||null;
+    if(!me){
+      const mineRank=await pool.query(`SELECT rank,student_user_id,best_percentage,best_score,total,attempts,display_name,class_name FROM (
+        SELECT o.*,RANK() OVER(ORDER BY o.best_percentage DESC,o.first_submitted_at ASC)::int AS rank
+        FROM (SELECT s.student_user_id,MAX(s.percentage) AS best_percentage,MAX(s.score) AS best_score,MAX(s.total) AS total,MIN(s.submitted_at) AS first_submitted_at,COUNT(*)::int AS attempts,u.display_name,u.student_id AS class_name
+              FROM exam_submissions s JOIN users u ON u.id=s.student_user_id WHERE s.exam_id=$1 GROUP BY s.student_user_id,u.display_name,u.student_id) o
+      ) z WHERE student_user_id=$2 LIMIT 1`,[exam.id,u.id]);
+      if(mineRank.rows[0]){
+        const x=mineRank.rows[0];
+        me={rank:Number(x.rank),displayName:x.display_name,className:x.class_name||null,bestScore:Number(x.best_score),total:Number(x.total),bestPercentage:Number(x.best_percentage),attempts:Number(x.attempts),isMe:true,attemptsList:byUser.get(x.student_user_id)||[]};
+        peers=(peers.length>=200?peers.slice(0,199):peers).concat(me);
+      }
+    }
     const totalMarks=parseQuestions(exam).reduce((sum,q)=>sum+(q.marks===undefined?1:Number(q.marks)||1),0);
     res.json({exam:{id:exam.id,title:exam.title,totalMarks:Number(totalMarks.toFixed(2)),passMarkPercent:exam.pass_mark_percent==null?null:Number(exam.pass_mark_percent)},me:me?{rank:me.rank,bestPercentage:me.bestPercentage,attempts:me.attempts}:null,peers});
   }catch(err){console.error(err);res.status(500).json({error:'Could not load peer results.'});}
@@ -897,8 +908,7 @@ app.get('/api/health', (req, res) => res.json({ok:true, ts:Date.now(), version:A
 
 app.post('/api/teacher/b2-presign', async(req,res)=>{ try{
   const u=await requireRole(req,res,'teacher'); if(!u)return;
-  if(!b2Configured)return res.status(503).json({error:'B2 storage not configured.'});
-  const {contentType='application/pdf', examId}=req.body||{};
+  if(!b2Configured)return res.status(503).json({error:'B2 storage not configured.'});  const {contentType='application/pdf', examId}=req.body||{};
   if(!examId)return res.status(400).json({error:'examId required.'});
   const key='exams/'+examId+'/pdf-'+Date.now()+'.pdf';
   const cmd=new PutObjectCommand({Bucket:process.env.B2_BUCKET,Key:key,ContentType:contentType});
@@ -1197,8 +1207,7 @@ app.post('/api/exam/:id/progress', async(req,res) => {
     return res.json({ok:true,progress:safeProgress});
   }catch(error){
     console.error('Save exam progress error:',error);
-    res.status(500).json({error:'Could not save exam progress'});
-  }
+    res.status(500).json({error:'Could not save exam progress'});  }
 });
 
 app.post('/api/exam/:id/finish', async(req,res)=>{
@@ -1252,13 +1261,14 @@ app.get('/api/exam/:id/result/:token', async(req,res)=>{
 
 app.get('/result/:publicToken', async(req,res)=>{
   try{
-    const {rows}=await pool.query(`SELECT s.id,s.student_id,s.student_name,s.score,s.total,s.percentage,s.results_json,s.submitted_at,e.title AS exam_title,e.result_visibility,e.pass_mark_percent FROM exam_submissions s JOIN exams e ON e.id=s.exam_id WHERE s.public_result_token=$1 LIMIT 1`,[req.params.publicToken]);
+    const {rows}=await pool.query(`SELECT s.id,s.student_id,s.student_name,s.score,s.total,s.percentage,s.results_json,s.submitted_at,e.title AS exam_title,e.result_visibility,e.pass_mark_percent,u.email AS student_email FROM exam_submissions s JOIN exams e ON e.id=s.exam_id LEFT JOIN users u ON u.id=s.student_user_id WHERE s.public_result_token=$1 LIMIT 1`,[req.params.publicToken]);
     const s=rows[0];if(!s)return res.status(404).type('html').send('<h1>Result not found</h1>');
     if(s.result_visibility==='hidden')return res.type('html').send('<!doctype html><html><body style="font-family:system-ui;padding:32px;text-align:center"><h1>Result not released</h1><p>This result has been submitted but is not available yet.</p></body></html>');
     const results=s.result_visibility==='instant'&&Array.isArray(s.results_json)?s.results_json:[];
     const resultHtml=results.map((q,i)=>'<article class="q '+(q.correct?'correct':'wrong')+'"><div class="status">'+(q.correct?'✓ CORRECT':'✕ INCORRECT')+'</div><h3>'+escapeHtml(q.questionNumber||i+1)+'. '+escapeHtml(q.question||'Question')+'</h3><p><b>Student answered:</b> '+escapeHtml(q.yourAnswer||'Unanswered')+'</p><p><b>Correct answer:</b> '+escapeHtml(q.correctAnswer||'—')+'</p></article>').join('');
     const pass=passedForExam(s,Number(s.percentage));
-    res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Result — ${escapeHtml(s.exam_title)}</title><style>body{font-family:system-ui;background:#f2f1ef;color:#171615;padding:28px}.wrap{max-width:900px;margin:auto}.head,.q{background:#fff;border:1px solid #ddd;border-radius:16px;padding:22px;margin-bottom:14px}.score{font-size:42px;font-weight:900;margin-top:12px}.muted{color:#666}.status{font-weight:800}.correct .status{color:#18864b}.wrong .status{color:#c43d3d}</style></head><body><main class="wrap"><section class="head"><h1>${escapeHtml(s.exam_title)}</h1><div class="muted">Shared exam result</div><div class="score">${Number(s.score)||0} / ${Number(s.total)||0}</div><div class="muted">${Number(s.percentage||0).toFixed(2)}% · submitted ${new Date(Number(s.submitted_at)).toLocaleString()}</div><p><b>${pass===null?'':(pass?'Passed':'Not passed')}</b></p></section><section>${resultHtml||'<div class="q"><p>Only the score is available for this result.</p></div>'}</section></main></body></html>`);
+    const emailRow='<div><b>Student ID</b><div>'+escapeHtml(s.student_id||'—')+'</div></div><div><b>Email</b><div>'+escapeHtml(s.student_email||'—')+'</div></div>';
+    res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Result — ${escapeHtml(s.exam_title)}</title><style>body{font-family:system-ui;background:#f2f1ef;color:#171615;padding:28px}.wrap{max-width:900px;margin:auto}.head,.q{background:#fff;border:1px solid #ddd;border-radius:16px;padding:22px;margin-bottom:14px}.score{font-size:42px;font-weight:900;margin-top:12px}.muted{color:#666}.status{font-weight:800}.correct .status{color:#18864b}.wrong .status{color:#c43d3d}</style></head><body><main class="wrap"><section class="head"><h1>${escapeHtml(s.exam_title)}</h1><div class="muted">Shared exam result</div><div class="score">${Number(s.score)||0} / ${Number(s.total)||0}</div><div class="muted">${Number(s.percentage||0).toFixed(2)}% · submitted ${new Date(Number(s.submitted_at)).toLocaleString()}</div><p><b>${pass===null?'':(pass?'Passed':'Not passed')}</b></p><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px"><div>${emailRow}</div></div></section><section>${resultHtml||'<div class="q"><p>Only the score is available for this result.</p></div>'}</section></main></body></html>`);
   }catch(err){console.error(err);res.status(500).type('html').send('<h1>Could not load result</h1>');}
 });
 
@@ -1497,8 +1507,7 @@ function sessionProgressSnapshot(extra={}){
     answers:session?.answers&&typeof session.answers==='object'?session.answers:{},
     currentQuestion:Number.isInteger(Number(session?.currentQuestion))?Math.max(0,Number(session.currentQuestion)):0,
     pdfPage:Number.isInteger(Number(session?.pdfPage))?Math.max(1,Number(session.pdfPage)):1,
-    pdfScrollRatio:Number.isFinite(Number(session?.pdfScrollRatio))?Math.min(1,Math.max(0,Number(session.pdfScrollRatio))):0,
-    ...existing,
+    pdfScrollRatio:Number.isFinite(Number(session?.pdfScrollRatio))?Math.min(1,Math.max(0,Number(session.pdfScrollRatio))):0,    ...existing,
     ...extra
   };
   p.answers=session?.answers&&typeof session.answers==='object'?session.answers:{};
@@ -1798,7 +1807,6 @@ async function renderPDF(pdfUrl){
   });
 
   paper.addEventListener('scroll',updatePdfReaderPosition,{passive:true});
-
   // Seekable PDF scrollbar: grab the thumb and drag it to jump through the
   // document, or click anywhere on the track to jump there.
   const scrollTrack=thumb.parentElement;
@@ -2089,7 +2097,6 @@ $('examStep').addEventListener('submit',e=>{e.preventDefault();enter()});
 });
 
 initDatabase().then(()=>{const PORT=process.env.PORT||3000;app.listen(PORT,()=>console.log(`Exam backend listening on port ${PORT}`));}).catch(error=>{console.error('Database initialization failed:',error);process.exit(1)});
-
 
 
 
