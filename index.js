@@ -682,6 +682,16 @@ app.delete('/api/auth/account', async(req,res)=>{
     const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
 
     await client.query('BEGIN');
+    if(u.role==='teacher'){
+      const classroomRows=await client.query('SELECT id FROM classrooms WHERE owner_user_id=$1',[u.id]);
+      const classroomIds=classroomRows.rows.map(row=>row.id);
+      await client.query('DELETE FROM notifications WHERE user_id=$1 OR classroom_id=ANY($2::text[])',[u.id,classroomIds]);
+      await client.query('DELETE FROM exam_drafts WHERE owner_user_id=$1',[u.id]);
+      await client.query('DELETE FROM classrooms WHERE owner_user_id=$1',[u.id]);
+    }else if(u.role==='student'){
+      await client.query('DELETE FROM classroom_members WHERE student_user_id=$1',[u.id]);
+      await client.query('DELETE FROM notifications WHERE user_id=$1',[u.id]);
+    }
     const ownedExams=await client.query('SELECT content_object_key,pdf_object_key FROM exams WHERE owner_user_id=$1 AND (content_object_key IS NOT NULL OR pdf_object_key IS NOT NULL)',[u.id]);
     await client.query('DELETE FROM exams WHERE owner_user_id=$1',[u.id]);
     await client.query('DELETE FROM exam_submissions WHERE student_user_id=$1',[u.id]);
