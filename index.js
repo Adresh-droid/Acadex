@@ -1493,11 +1493,16 @@ app.post('/exam/create', async(req,res)=>{
     if(classroomIds===null)return res.status(400).json({error:'Invalid classroom.'});
     const examId='exam_'+crypto.randomBytes(12).toString('hex');
     const contentObjectKey=type==='pdf'?(b.b2Key?String(b.b2Key):await uploadPdfToB2(examId,pdfDataUrl)):await uploadTemplateToB2(examId,normalizedQuestions);
-    await pool.query(`INSERT INTO exams(id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,[examId,title,type,null,null,contentObjectKey,null,studentPassword,durationMs,Date.now(),user.id,safeFolderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,null,peersVisible]);
     const now=Date.now(),baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');
     const assignmentClient=await pool.connect();let notified=[];
-    try{await assignmentClient.query('BEGIN');if(classroomIds.length)await assignmentClient.query('INSERT INTO exam_classrooms(exam_id,classroom_id,assigned_at) SELECT $1,x,$3 FROM unnest($2::text[]) AS x',[examId,classroomIds,now]);notified=await insertExamAssignmentNotifications(assignmentClient,examId,title,classroomIds,user.display_name,now);await assignmentClient.query('COMMIT');}
-    catch(linkErr){try{await assignmentClient.query('ROLLBACK')}catch(_){}throw linkErr;}finally{assignmentClient.release();}
+    try{
+      await assignmentClient.query('BEGIN');
+      await assignmentClient.query(`INSERT INTO exams(id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,[examId,title,type,null,null,contentObjectKey,null,studentPassword,durationMs,now,user.id,safeFolderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,null,peersVisible]);
+      if(classroomIds.length)await assignmentClient.query('INSERT INTO exam_classrooms(exam_id,classroom_id,assigned_at) SELECT $1,x,$3 FROM unnest($2::text[]) AS x',[examId,classroomIds,now]);
+      notified=await insertExamAssignmentNotifications(assignmentClient,examId,title,classroomIds,user.display_name,now);
+      await assignmentClient.query('COMMIT');
+    }catch(linkErr){try{await assignmentClient.query('ROLLBACK')}catch(_){}throw linkErr;}
+    finally{assignmentClient.release();}
     if(notified.length)sendAssignmentPushes(notified,title,examId,baseUrl+'/exam/'+encodeURIComponent(examId));
     res.json({examId,url:baseUrl+'/exam/'+encodeURIComponent(examId)});
   }catch(error){console.error('Create exam error:',error);res.status(400).json({error:error.message||'Failed to create exam'});}
