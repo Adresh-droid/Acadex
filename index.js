@@ -304,6 +304,31 @@ function makeDeviceId() {
   return crypto.randomBytes(24).toString('hex');
 }
 function hashToken(token){ return crypto.createHash('sha256').update(token).digest('hex'); }
+function examGateSignature(payload){
+  const secret=process.env.EXAM_GATE_SECRET||process.env.DATABASE_URL||process.env.SESSION_SECRET||process.env.JWT_SECRET;
+  if(!secret) throw new Error('EXAM_GATE_SECRET must be configured for persistent exam authorization.');
+  return crypto.createHmac('sha256',secret).update(payload).digest('base64url');
+}
+function readRequestCookie(req,name){
+  const header=String(req.headers.cookie||'');
+  for(const part of header.split(';')){const i=part.indexOf('=');if(i<0)continue;if(part.slice(0,i).trim()===name)return decodeURIComponent(part.slice(i+1).trim())}
+  return '';
+}
+function verifyExamGate(req,examId,userId){
+  try{
+    const token=readRequestCookie(req,'acadex_exam_gate'),dot=token.lastIndexOf('.');
+    if(dot<=0)return false;
+    const payload=token.slice(0,dot),signature=token.slice(dot+1),expected=examGateSignature(payload),a=Buffer.from(signature),b=Buffer.from(expected);
+    if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return false;
+    const data=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));
+    return data.examId===examId&&data.userId===userId&&Number(data.expiresAt)>Date.now();
+  }catch(_){return false}
+}
+function setExamGateCookie(req,res,examId,userId){
+  const expiresAt=Date.now()+24*60*60*1000,payload=Buffer.from(JSON.stringify({examId,userId,expiresAt})).toString('base64url');
+  const value=payload+'.'+examGateSignature(payload),secure=req.secure||String(req.headers['x-forwarded-proto']||'').split(',')[0].trim()==='https';
+  res.cookie('acadex_exam_gate',value,{httpOnly:true,secure,sameSite:'lax',path:'/',maxAge:24*60*60*1000});
+}
 function hashPassword(password, salt){ return crypto.scryptSync(password, salt, 64).toString('hex'); }
 function makePasswordHash(password){ const salt=crypto.randomBytes(16).toString('hex'); return salt+':'+hashPassword(password,salt); }
 function verifyPassword(password, stored){ try{ const [salt,hex]=String(stored).split(':'); if(!salt||!hex)return false; const a=Buffer.from(hashPassword(password,salt),'hex'); const b=Buffer.from(hex,'hex'); return a.length===b.length && crypto.timingSafeEqual(a,b); }catch(_){return false;} }
@@ -1050,6 +1075,20 @@ app.get('/api/exam/:id/pdf', async(req,res) => {
   }
 });
 
+app.get('/api/exam/:id/authorization',async(req,res)=>{
+  try{const exam=await getExam(req.params.id,{loadContent:false});if(!exam)return res.status(404).json({error:'Exam not found'});const u=await getAuthUser(req);if(!u||u.role!=='student')return res.status(401).json({error:'Student account login is required.'});return res.json({authorized:verifyExamGate(req,exam.id,u.id)})}
+  catch(error){console.error('Check exam authorization error:',error);res.status(500).json({error:'Could not check exam authorization.'})}
+});
+app.post('/api/exam/:id/authorize',async(req,res)=>{
+  try{
+    const exam=await getExam(req.params.id,{loadContent:false});if(!exam)return res.status(404).json({error:'Exam not found'});if(exam.archived_at)return res.status(403).json({error:'This exam is archived.'});
+    const u=await getAuthUser(req);if(!u||u.role!=='student')return res.status(401).json({error:'Student account login is required.'});
+    const password=typeof req.body?.password==='string'?req.body.password:'';
+    if(!password)return res.status(401).json({error:'Enter the exam password.'});if(password!==exam.student_password)return res.status(401).json({error:'Incorrect password.'});
+    const completed=await pool.query('SELECT 1 FROM exam_submissions WHERE exam_id=$1 AND student_user_id=$2 LIMIT 1',[exam.id,u.id]);if(completed.rows[0])return res.status(409).json({error:'You have already completed this exam.'});
+    setExamGateCookie(req,res,exam.id,u.id);return res.json({authorized:true,expiresIn:86400});
+  }catch(error){console.error('Authorize exam error:',error);res.status(500).json({error:'Could not verify exam password.'})}
+});
 app.post('/api/exam/:id/session', async(req, res) => {
   try{
     const exam=await getExam(req.params.id,{loadContent:false});
@@ -1086,11 +1125,11 @@ app.post('/api/exam/:id/session', async(req, res) => {
           await pool.query('UPDATE exam_sessions SET student_user_id=$1 WHERE token=$2',[authUser.id,existing.token]);
         }
         const now=Date.now();
-        if(existing.finished_at || now>=Number(existing.end_at)){
-          if(!existing.finished_at){
-            await pool.query('UPDATE exam_sessions SET finished_at=$1 WHERE token=$2',[now,existing.token]);
-          }
-          return res.status(410).json({error:'This exam attempt is already finished.',endAt:Number(existing.end_at)});
+        if(existing.finished_at){
+          const prior=await pool.query('SELECT 1 FROM exam_submissions WHERE session_token=$1 LIMIT 1',[existing.token]);
+          if(prior.rows[0]||now<Number(existing.end_at))return res.status(410).json({error:'This exam attempt is already finished.',endAt:Number(existing.end_at)});
+          // Legacy attempts may have been marked finished by the old timeout path before submission.
+          // Return the expired session so the client can submit it immediately.
         }
         return res.json({
           sessionToken:existing.token,
@@ -1124,7 +1163,7 @@ app.post('/api/exam/:id/session', async(req, res) => {
       [exam.id,authUser.id]
     );
     const active=activeResult.rows[0];
-    if(active && Date.now()<Number(active.end_at)){
+    if(active){
       return res.json({
         sessionToken:active.token,
         studentId:active.student_id,
@@ -1143,8 +1182,8 @@ app.post('/api/exam/:id/session', async(req, res) => {
     if(!studentName) return res.status(400).json({error:'Student name is required.'});
     if(studentId.length>100) return res.status(400).json({error:'Student ID is too long.'});
     if(studentName.length>150) return res.status(400).json({error:'Student name is too long.'});
-    if(!password) return res.status(401).json({error:'Exam password required.',code:'EXAM_PASSWORD_REQUIRED'});
-    if(password!==exam.student_password) return res.status(401).json({error:'Incorrect password'});
+    if(!password&&!(body.startAuthorized===true&&verifyExamGate(req,exam.id,authUser.id))) return res.status(401).json({error:'Exam password required.',code:'EXAM_PASSWORD_REQUIRED'});
+    if(password&&password!==exam.student_password) return res.status(401).json({error:'Incorrect password'});
 
     const sessionToken=makeToken();
     const startedAt=Date.now();
@@ -1156,6 +1195,7 @@ app.post('/api/exam/:id/session', async(req, res) => {
       [sessionToken,exam.id,startedAt,endAt,startedAt,studentId,studentName,deviceId,authUser.id,{}]
     );
 
+    res.clearCookie('acadex_exam_gate',{path:'/'});
     return res.json({
       sessionToken,
       studentId,
@@ -1197,10 +1237,7 @@ app.post('/api/exam/:id/progress', async(req,res) => {
       return res.status(403).json({error:'This exam attempt belongs to another student account.'});
     }
     if(session.finished_at) return res.status(409).json({error:'This attempt is already closed.'});
-    if(Date.now()>=Number(session.end_at)){
-      await pool.query('UPDATE exam_sessions SET finished_at=$1 WHERE token=$2',[Date.now(),session.token]);
-      return res.status(410).json({error:'This exam attempt has expired.'});
-    }
+    if(Date.now()>=Number(session.end_at))return res.status(410).json({error:'This exam attempt has expired.'});
 
     const progress=req.body?.progress && typeof req.body.progress==='object' ? req.body.progress : {};
     const safeProgress={
@@ -1229,7 +1266,7 @@ app.post('/api/exam/:id/finish', async(req,res)=>{
     const sr=await pool.query('SELECT token,student_id,student_name,student_user_id,end_at,finished_at FROM exam_sessions WHERE token=$1 AND exam_id=$2',[finishToken,exam.id]),session=sr.rows[0];
     if(!session)return res.status(404).json({error:'Session not found'});if(session.student_user_id&&session.student_user_id!==authUser.id)return res.status(403).json({error:'This exam attempt belongs to another student account.'});
     if(!session.student_user_id){await pool.query('UPDATE exam_sessions SET student_user_id=$1 WHERE token=$2',[authUser.id,session.token]);session.student_user_id=authUser.id}
-    if(session.finished_at)return res.status(409).json({error:'This attempt is already closed.'});
+    if(session.finished_at&&Date.now()<Number(session.end_at))return res.status(409).json({error:'This attempt is already closed.'});
     const answers=req.body?.answers&&typeof req.body.answers==='object'?req.body.answers:{},submittedAt=Date.now();
     if(exam.type==='pdf'){
       const submissionId='sub_'+crypto.randomBytes(12).toString('hex');
@@ -1286,6 +1323,8 @@ app.get('/exam/:id', async(req, res) => {
   res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(exam.title)}</title>
 <style>
 *{box-sizing:border-box}html, body{margin:0;min-height:100%;font-family:system-ui, -apple-system, "Segoe UI", sans-serif;background:#0d0c0b;color:#f0ece4}.hidden{display:none!important}
+#busyOverlay{display:none;position:fixed;inset:0;z-index:2147483600;align-items:center;justify-content:center;padding:22px;background:rgba(8,8,8,.88);backdrop-filter:blur(12px)}
+#busyOverlay.active{display:flex}.busy-card{width:min(390px,100%);padding:30px 26px;border:1px solid #ffffff20;border-radius:18px;background:#181614;color:#f0ece4;text-align:center;box-shadow:0 24px 80px #0009}.busy-card h2{margin:18px 0 8px;font-size:21px}.busy-card p{color:#aaa;line-height:1.5;margin:0 0 18px}.busy-spinner{width:42px;height:42px;border:4px solid #ffffff24;border-top-color:#f0ece4;border-radius:50%;margin:auto;animation:acadexSpin .8s linear infinite}@keyframes acadexSpin{to{transform:rotate(360deg)}}
 #portal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0a0908;padding:24px}.card{width:min(450px, 100%);padding:34px 30px;background:#181614;border:1px solid #ffffff18;border-radius:20px;text-align:center;box-shadow:0 24px 64px #0008}.card h1{margin:0 0 8px}.card p{color:#aaa;line-height:1.5}.card input{width:100%;padding:13px;margin:7px 0;border:1px solid #ffffff22;border-radius:10px;background:#0e0d0c;color:#fff;font-size:16px}.card button, .finish{border:0;border-radius:10px;padding:13px 18px;font-size:16px;font-weight:700;cursor:pointer;background:#f0ece4;color:#111}.card button{width:100%;margin-top:10px}.err{color:#ff7b7b;min-height:22px;margin-top:10px}
 #app{display:none;min-height:100vh;background:#f2f1ef;color:#171615;padding:24px}.top{max-width:900px;margin:0 auto 18px;display:flex;align-items:center;justify-content:space-between;gap:16px}.top h1{margin:0;font-size:24px}.timer{font-weight:800;background:#171615;color:#fff;padding:10px 14px;border-radius:10px}.paper{max-width:900px;margin:0 auto;background:#fff;color:#181716;padding:42px 52px;border-radius:5px;box-shadow:0 10px 35px #0001}.paper-title{text-align:center;font-size:25px;font-weight:800;margin-bottom:34px}.question-page{display:none}.question-page.active{display:block}.q-text{font-size:25px;line-height:1.45;font-weight:600;margin-bottom:28px;white-space:pre-wrap}.q{margin:0 0 28px;padding-bottom:22px;border-bottom:1px solid #eee}.q-num{font-weight:700;font-size:17px;line-height:1.5;margin-bottom:12px}.answer-option{display:flex;align-items:center;gap:12px;padding:13px 15px;margin:8px 0;border:1px solid #ddd;border-radius:10px;cursor:pointer;transition:.15s ease;background:#fff}.answer-option:hover{background:#f5f5f5}.pager-nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:14px;margin-top:28px}.pager-nav .finish{width:auto}.pager-nav #prevBtn{justify-self:start}.pager-nav #nextBtn,.pager-nav #submitBtn{justify-self:end}.pager-count{text-align:center;color:#666;font-weight:700;font-size:13px}.answer-option input{width:18px;height:18px;cursor:pointer;flex:none}.answer-option span{cursor:pointer;flex:1}.review-head{text-align:center;border-bottom:1px solid #eee;padding-bottom:28px;margin-bottom:28px}.score{font-size:42px;font-weight:900}.pct{font-size:18px;color:#666}.review-item{padding:20px 0;border-bottom:1px solid #eee}.status{font-weight:800;margin-bottom:8px}.correct{color:#137333}.wrong{color:#b3261e}.unanswered{color:#666}.review-label{font-weight:700}.review-answer{margin:5px 0 10px;color:#444}
 /* PDF reading mode: the document owns the scroll, while the header floats above it. */
@@ -1343,162 +1382,36 @@ app.get('/exam/:id', async(req, res) => {
 <form id="examStep" class="hidden">
   <div id="studentWelcome" style="margin:10px 0 16px;color:#bbb"></div>
   <input id="pwd" type="password" placeholder="Exam password" autocomplete="off">
-  <button id="enter" type="submit">Enter Exam</button>
+  <button id="enter" type="submit">Verify Password</button>
 </form>
+<section id="startStep" class="hidden" style="margin-top:14px">
+  <div style="border:1px solid #ffffff20;background:#201e1b;border-radius:12px;padding:16px;text-align:left"><div style="font-weight:800;margin-bottom:6px">You're cleared to start</div><div id="gateMessage" style="color:#bbb;font-size:14px;line-height:1.5">Your exam password is verified. The timer will not start until you choose Start Exam.</div></div>
+  <button id="startNow" type="button">Start Exam Now</button>
+  <button id="waitStart" class="finish" type="button" style="background:#2a2927;color:#fff">Wait — I'll start later</button>
+</section>
 <div id="err" class="err"></div></div></div><div id="app"><div class="top"><h1 id="examTitle"></h1><div style="display:flex;align-items:center;gap:10px"><button id="pdfSubmitBtn" class="finish hidden" type="button">Submit Exam</button><div id="timer" class="timer">--:--</div></div></div><div id="paper" class="paper"></div></div>
+<div id="busyOverlay" role="status" aria-live="polite"><div class="busy-card"><div class="busy-spinner"></div><h2 id="busyTitle">Submitting exam…</h2><p id="busyMessage">Please keep this page open while Acadex saves your attempt.</p><button id="retrySubmit" class="finish hidden" type="button">Retry submission</button></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
   const EXAM_ID=${safeId};
   const EXAM_TITLE=${safeTitle};
   const API='/api/exam/'+encodeURIComponent(EXAM_ID);
-  const DB_NAME='exam-tool-student';
-  const STORE='sessions';
-  let session=null, examData=null, timerId=null, studentAuthToken='';
-  const $=id => document.getElementById(id);
-  function deviceId() {
-    let id=localStorage.getItem('exam_device_id');
-    if(!id) {
-      id=(crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now());
-      localStorage.setItem('exam_device_id', id)
-    }
-    return id
-  }
-  const ACCOUNT_STORE='accounts';
+  let session=null,examData=null,timerId=null,studentAuthToken='',submitPromise=null;
+  const $=id=>document.getElementById(id);
+  const cookieOptions='; Path=/; SameSite=Lax'+(location.protocol==='https:'?'; Secure':'');
+  function setClientCookie(name,value,days=30){document.cookie=name+'='+encodeURIComponent(value)+'; Max-Age='+(Math.max(0,days)*86400)+cookieOptions}
+  function getClientCookie(name){const prefix=name+'=';for(const part of document.cookie.split(';')){const item=part.trim();if(item.startsWith(prefix)){try{return decodeURIComponent(item.slice(prefix.length))}catch(_){return ''}}}return ''}
+  function deleteClientCookie(name){document.cookie=name+'=; Max-Age=0'+cookieOptions}
+  function deviceId(){let id=getClientCookie('acadex_exam_device_id');if(!id){id=(crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now());setClientCookie('acadex_exam_device_id',id,365)}return id}
   const ACCOUNT_STORAGE_KEY='acadex_student_account_v1';
-
-  function idb() {
-    return new Promise((resolve, reject) => {
-      const r=indexedDB.open(DB_NAME, 2);
-      r.onupgradeneeded=() => {
-        if(!r.result.objectStoreNames.contains(STORE))r.result.createObjectStore(STORE, {keyPath:'examId'});
-        if(!r.result.objectStoreNames.contains(ACCOUNT_STORE))r.result.createObjectStore(ACCOUNT_STORE, {keyPath:'userId'});
-      };
-      r.onsuccess=() => resolve(r.result);
-      r.onerror=() => reject(r.error)
-    })
-  }
-
-  function readLocalDeviceAccount(){
-    try{
-      const raw=localStorage.getItem(ACCOUNT_STORAGE_KEY);
-      if(!raw)return null;
-      const account=JSON.parse(raw);
-      return account&&account.token&&account.userId?account:null;
-    }catch(_){return null}
-  }
-
-  function writeLocalDeviceAccount(account){
-    try{
-      localStorage.setItem(ACCOUNT_STORAGE_KEY,JSON.stringify(account));
-      return true;
-    }catch(error){
-      console.warn('[Acadex] Could not persist the remembered student account in localStorage:',error);
-      return false;
-    }
-  }
-
-  function clearLocalDeviceAccount(){
-    try{localStorage.removeItem(ACCOUNT_STORAGE_KEY)}catch(_){}
-  }
-
-  async function saved() {
-    const db=await idb();
-    return new Promise((resolve, reject) => {
-      const r=db.transaction(STORE, 'readonly').objectStore(STORE).get(EXAM_ID);
-      r.onsuccess=() => resolve(r.result||null);
-      r.onerror=() => reject(r.error)
-    })
-  }
-
-  async function save(v) {
-    const db=await idb();
-    return new Promise((resolve, reject) => {
-      const r=db.transaction(STORE, 'readwrite').objectStore(STORE).put(v);
-      r.onsuccess=resolve;
-      r.onerror=() => reject(r.error)
-    })
-  }
-
-  async function savedAccounts() {
-    let rows=[];
-    try{
-      const db=await idb();
-      rows=await new Promise((resolve,reject)=>{
-        const r=db.transaction(ACCOUNT_STORE,'readonly').objectStore(ACCOUNT_STORE).getAll();
-        r.onsuccess=()=>resolve(Array.isArray(r.result)?r.result:[]);
-        r.onerror=()=>reject(r.error);
-      });
-    }catch(error){
-      console.warn('[Acadex] IndexedDB account lookup failed; using localStorage fallback:',error);
-    }
-
-    rows.sort((a,b)=>(b.savedAt||0)-(a.savedAt||0));
-    const account=rows[0]||readLocalDeviceAccount();
-    return account?[account]:[];
-  }
-
-  async function savedDeviceAccount() {    const rows=await savedAccounts();
-    return rows[0]||null;
-  }
-
-  async function saveAccount(user,token) {
-    if(!user?.id||!token)return;
-    const account={
-      userId:user.id,
-      email:user.email||'',
-      displayName:user.displayName||user.email||'Student',
-      studentId:user.studentId||'',
-      token,
-      savedAt:Date.now()
-    };
-
-    // Keep a single account in both stores. localStorage is the durable
-    // fallback used if IndexedDB is unavailable/reset in this browser context.
-    const localSaved=writeLocalDeviceAccount(account);
-    let indexedSaved=false;
-    try{
-      const db=await idb();
-      await new Promise((resolve,reject)=>{
-        const tx=db.transaction(ACCOUNT_STORE,'readwrite');
-        const store=tx.objectStore(ACCOUNT_STORE);
-        store.clear();
-        store.put(account);
-        tx.oncomplete=resolve;
-        tx.onerror=()=>reject(tx.error);
-        tx.onabort=()=>reject(tx.error||new Error('Could not save the device account.'));
-      });
-      indexedSaved=true;
-    }catch(error){
-      console.warn('[Acadex] IndexedDB account save failed; localStorage copy retained:',error);
-    }
-
-    // Ask the browser for persistent site storage when supported. This does
-    // not block login and simply reduces the chance of storage eviction.
-    try{
-      if(navigator.storage?.persist)await navigator.storage.persist();
-    }catch(_){}
-
-    if(!localSaved&&!indexedSaved)throw new Error('Could not save the remembered student account on this device.');
-  }
-
-  async function removeAccount(userId) {
-    const local=readLocalDeviceAccount();
-    if(!userId||!local||local.userId===userId)clearLocalDeviceAccount();
-
-    try{
-      const db=await idb();
-      await new Promise((resolve,reject)=>{
-        const tx=db.transaction(ACCOUNT_STORE,'readwrite');
-        const store=tx.objectStore(ACCOUNT_STORE);
-        if(userId)store.delete(userId);else store.clear();
-        tx.oncomplete=resolve;
-        tx.onerror=()=>reject(tx.error);
-        tx.onabort=()=>reject(tx.error||new Error('Could not clear the device account.'));
-      });
-    }catch(error){
-      console.warn('[Acadex] IndexedDB account removal failed:',error);
-    }
-  }
+  function readLocalDeviceAccount(){try{const raw=getClientCookie(ACCOUNT_STORAGE_KEY);if(!raw)return null;const a=JSON.parse(raw);return a&&a.token&&a.userId?a:null}catch(_){return null}}
+  function writeLocalDeviceAccount(a){try{setClientCookie(ACCOUNT_STORAGE_KEY,JSON.stringify(a),30);return true}catch(e){console.warn('[Acadex] Could not persist account cookie:',e);return false}}
+  function clearLocalDeviceAccount(){deleteClientCookie(ACCOUNT_STORAGE_KEY)}
+  async function saved(){try{const raw=getClientCookie('acadex_exam_session_'+EXAM_ID);if(!raw)return null;const v=JSON.parse(raw);return v&&v.examId===EXAM_ID?v:null}catch(_){return null}}
+  async function save(v){try{const keep={examId:EXAM_ID,sessionToken:v?.sessionToken||'',studentId:v?.studentId||'',studentName:v?.studentName||'',deviceId:v?.deviceId||'',startedAt:Number(v?.startedAt)||0,endAt:Number(v?.endAt)||0,finishedAt:Number(v?.finishedAt)||0,submissionId:v?.submissionId||'',currentQuestion:Number(v?.currentQuestion)||0,pdfPage:Math.max(1,Number(v?.pdfPage)||1),pdfScrollRatio:Math.min(1,Math.max(0,Number(v?.pdfScrollRatio)||0))};setClientCookie('acadex_exam_session_'+EXAM_ID,JSON.stringify(keep),30);return true}catch(e){console.warn('[Acadex] Could not persist exam cookie:',e);return false}}
+  async function savedDeviceAccount(){return readLocalDeviceAccount()}
+  async function saveAccount(user,token){if(!user?.id||!token)return;const a={userId:user.id,email:user.email||'',displayName:user.displayName||user.email||'Student',studentId:user.studentId||'',token,savedAt:Date.now()};if(!writeLocalDeviceAccount(a))throw new Error('Could not save the remembered student account in a cookie.')}
+  async function removeAccount(userId){const a=readLocalDeviceAccount();if(!userId||!a||a.userId===userId)clearLocalDeviceAccount()}
   function fmt(ms) {
     ms=Math.max(0, ms);
     const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
@@ -1564,7 +1477,7 @@ function applyServerProgress(d,fallback={}){
   };
 }
 
-async function startSession(passwordOverride){
+async function startSession(passwordOverride,startAuthorized=false){
   const old=await saved(); const did=deviceId();
   const password=typeof passwordOverride==='string'?passwordOverride:String($('pwd')?.value||'');
 
@@ -1606,14 +1519,13 @@ async function startSession(passwordOverride){
     throw new Error(resumeData.error||'Could not check the existing exam session.');
   }
 
-  if(!password)throw new Error('Enter the exam password.');
   const r=await fetch(API+'/session',{
     method:'POST',
     headers:{'Content-Type':'application/json','Authorization':'Bearer '+studentAuthToken},
-    body:JSON.stringify({deviceId:did,password})
+    body:JSON.stringify({deviceId:did,...(password?{password}:{}),...(startAuthorized?{startAuthorized:true}:{})})
   });
   const d=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(d.error||'Could not start exam');
+  if(!r.ok){if(r.status===401&&d.code==='EXAM_PASSWORD_REQUIRED')throw new Error('Enter the exam password.');throw new Error(d.error||'Could not start exam')}
   if(!d.sessionToken)throw new Error('The server did not return a session token. Please try again.');
   applyServerProgress(d,{});
   await save({...session,examId:EXAM_ID});
@@ -1644,9 +1556,25 @@ function renderTemplate(){
   $('submitBtn').onclick=()=>submitExam(false);
   update();
 }
-async function submitExam(auto){if(!session)return;clearInterval(timerId);clearTimeout(progressSaveTimer);await persistExamProgress({},true);const r=await fetch(API+'/finish', {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+studentAuthToken}, body:JSON.stringify({sessionToken:session.sessionToken, answers:session.answers||{}})});const d=await r.json();if(!r.ok){if(!auto)alert(d.error||'Could not submit exam');startTimer();return false}session.finishedAt=d.submittedAt||Date.now();await save({...session, examId:EXAM_ID, finishedAt:session.finishedAt, submissionId:d.submissionId, answers:session.answers||{}});if(examData?.type==='pdf'){ $('pdfSubmitBtn').classList.add('hidden'); $('timer').style.display='none'; $('paper').innerHTML='<div class="review-head"><div style="font-size:24px;font-weight:800">Exam Submitted</div><p>Your PDF exam has been submitted and this attempt is now closed.</p></div>'; return true;}showReview(d);return true}
+async function submitExam(auto){
+  if(submitPromise)return submitPromise;if(!session||session.finishedAt)return false;
+  submitPromise=(async()=>{
+    clearInterval(timerId);clearTimeout(progressSaveTimer);showBusy(auto?'Time is up — submitting your exam':'Submitting your exam','Please keep this page open while Acadex saves your attempt.');
+    try{
+      await persistExamProgress({},true);
+      const r=await fetch(API+'/finish',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+studentAuthToken},body:JSON.stringify({sessionToken:session.sessionToken,answers:session.answers||{}})});
+      const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'Could not submit exam');
+      session.finishedAt=d.submittedAt||Date.now();session.submissionId=d.submissionId||'';await save({...session,examId:EXAM_ID,finishedAt:session.finishedAt,submissionId:session.submissionId});
+      hideBusy();if(examData?.type==='pdf'){$('pdfSubmitBtn').classList.add('hidden');$('timer').style.display='none';$('paper').innerHTML='<div class="review-head"><div style="font-size:24px;font-weight:800">Exam Submitted</div><p>Your PDF exam has been submitted and this attempt is now closed.</p></div>'}else showReview(d);return true;
+    }catch(error){console.error('[Acadex] Exam submission failed:',error);showBusy('Submission not confirmed',String(error.message||'Please check your connection and retry.'),true);return false}
+    finally{if(session?.finishedAt)hideBusy();submitPromise=null}
+  })();return submitPromise;
+}
 function showReview(d){$('timer').style.display='none';let html='<div class="review-head"><div style="font-size:24px;font-weight:800">Exam Complete</div><div class="score">'+d.score+' / '+d.total+'</div><div class="pct">'+d.percentage+'%</div><p>This attempt is now closed. You cannot retake this exam.</p></div>';d.results.forEach(r => {const cls=r.correct?'correct':r.yourAnswer === 'Unanswered'?'unanswered':'wrong';const status=r.correct?'Correct ✓':r.yourAnswer === 'Unanswered'?'Unanswered':'Wrong ✗';html+='<div class="review-item"><div class="status '+cls+'">'+status+' — Question '+r.questionNumber+'</div><div><b>'+esc(r.question)+'</b></div><div class="review-answer"><span class="review-label">Your answer:</span> '+esc(r.yourAnswer)+'</div><div class="review-answer"><span class="review-label">Correct answer:</span> '+esc(r.correctAnswer)+'</div></div>'});$('paper').innerHTML=html}
-function startTimer(){clearInterval(timerId);timerId=setInterval(async() => {const left=Number(session.endAt)-Date.now();$('timer').textContent=fmt(left);if(left<=0){clearInterval(timerId);await submitExam(true)}}, 250);$('timer').textContent=fmt(Number(session.endAt)-Date.now())}
+function showBusy(title,message,retry=false){$('busyTitle').textContent=title;$('busyMessage').textContent=message;$('retrySubmit').classList.toggle('hidden',!retry);$('busyOverlay').classList.add('active')}
+function hideBusy(){$('busyOverlay').classList.remove('active')}
+$('retrySubmit').onclick=()=>{submitPromise=null;submitExam(true)};
+function startTimer(){clearInterval(timerId);const tick=()=>{const left=Number(session.endAt)-Date.now();$('timer').textContent=fmt(left);if(left<=0){clearInterval(timerId);submitExam(true)}};tick();if(!session.finishedAt)timerId=setInterval(tick,250)}
 async function showExam(d){examData=d;$('portal').style.display='none';$('app').style.display='block';$('app').classList.toggle('pdf-mode',d.type==='pdf');$('app').classList.remove('pdf-reading');document.querySelector('.pdf-reader-rail')?.remove();$('examTitle').textContent=d.title||EXAM_TITLE;$('pdfSubmitBtn').classList.toggle('hidden',d.type!=='pdf');if(d.type==='pdf'){$('pdfSubmitBtn').onclick=()=>submitExam(false);setupPdfReadingMode()}if(d.type === 'template')renderTemplate();else await renderPDF(d.pdfUrl);startTimer()}
 async function renderPDF(pdfUrl){
   const paper=$('paper'); paper.innerHTML='';
@@ -2006,6 +1934,9 @@ function setAccountMode(mode){
     ? 'Create your student account, then enter the exam password.'
     : 'Sign in once. Acadex will remember this student account on this device for future exams.';
 }
+let savedAccountBusy=false;
+async function showStartPermission(){$('examStep').classList.add('hidden');$('startStep').classList.remove('hidden');$('err').textContent='';$('gateMessage').textContent='Your exam password is verified. The timer will not start until you choose Start Exam. This screen will remain available if you refresh.'}
+async function checkSavedAuthorization(){if(!studentAuthToken)return false;try{const r=await fetch(API+'/authorization',{headers:{Authorization:'Bearer '+studentAuthToken}});const d=await r.json().catch(()=>({}));if(r.ok&&d.authorized){await showStartPermission();return true}}catch(_){}return false}
 async function useSavedDeviceAccount(){
   if(savedAccountBusy)return false;
   const acc=await savedDeviceAccount();
@@ -2026,7 +1957,7 @@ async function useSavedDeviceAccount(){
     $('accountTabs').classList.add('hidden');
     $('examStep').classList.remove('hidden');
     const resumed=await tryAutoResume();
-    if(!resumed)$('pwd').focus();
+    if(!resumed){const authorized=await checkSavedAuthorization();if(!authorized)$('pwd').focus()}
     return true;
   }catch(e){
     console.error('[Acadex] Remembered student account restore failed:',e);
@@ -2070,7 +2001,7 @@ async function loginStudent(){
     $('studentWelcome').textContent='Signed in as '+(d.user.displayName||d.user.email)+(d.user.studentId?' · Student ID '+d.user.studentId:'');
     $('accountStep').classList.add('hidden');$('accountTabs').classList.add('hidden');$('examStep').classList.remove('hidden');
     const resumed=await tryAutoResume();
-    if(!resumed)$('pwd').focus();
+    if(!resumed){const authorized=await checkSavedAuthorization();if(!authorized)$('pwd').focus()}
   }catch(e){$('err').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=accountMode==='register'?'Create Student Account':'Sign in as Student'}
 }
@@ -2078,12 +2009,20 @@ async function enter(){
   const btn=$('enter');$('err').textContent='';btn.disabled=true;btn.textContent='Checking…';
   try{
     if(!studentAuthToken)throw new Error('Sign in to your student account first.');
-    const d=await startSession();
-    if(!d||!d.sessionToken||!session||!session.sessionToken)throw new Error('Could not establish an exam session. Please try again.');
-    await showExam(d);
-  }catch(e){console.error('Acadex exam start error:',e);$('err').textContent=e.message}
-  finally{btn.disabled=false;btn.textContent='Enter Exam'}
+    const password=$('pwd').value;if(!password)throw new Error('Enter the exam password.');
+    const r=await fetch(API+'/authorize',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+studentAuthToken},body:JSON.stringify({password})});
+    const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'Could not verify exam password.');await showStartPermission();
+  }catch(e){console.error('Acadex exam authorization error:',e);$('err').textContent=e.message}
+  finally{btn.disabled=false;btn.textContent='Verify Password'}
 }
+async function startAuthorizedExam(){
+  const btn=$('startNow');$('err').textContent='';btn.disabled=true;btn.textContent='Starting…';showBusy('Starting your exam','The timer will begin when Acadex confirms your exam session.');
+  try{const d=await startSession('',true);if(!d||!d.sessionToken||!session||!session.sessionToken)throw new Error('Could not establish an exam session. Please try again.');hideBusy();await showExam(d)}
+  catch(e){hideBusy();console.error('Acadex exam start error:',e);$('err').textContent=e.message}
+  finally{btn.disabled=false;btn.textContent='Start Exam Now'}
+}
+$('startNow').addEventListener('click',startAuthorizedExam);
+$('waitStart').addEventListener('click',()=>{$('gateMessage').textContent='No problem — your password is verified. Your timer is still paused. Press Start Exam Now whenever you are ready.';$('err').textContent=''});
 $('showLogin').addEventListener('click',()=>setAccountMode('login'));
 $('showRegister').addEventListener('click',()=>setAccountMode('register'));
 $('accountStep').addEventListener('submit',e=>{e.preventDefault();loginStudent()});
