@@ -1934,7 +1934,6 @@ function setAccountMode(mode){
     ? 'Create your student account, then enter the exam password.'
     : 'Sign in once. Acadex will remember this student account on this device for future exams.';
 }
-let savedAccountBusy=false;
 async function showStartPermission(){$('examStep').classList.add('hidden');$('startStep').classList.remove('hidden');$('err').textContent='';$('gateMessage').textContent='Your exam password is verified. The timer will not start until you choose Start Exam. This screen will remain available if you refresh.'}
 async function checkSavedAuthorization(){if(!studentAuthToken)return false;try{const r=await fetch(API+'/authorization',{headers:{Authorization:'Bearer '+studentAuthToken}});const d=await r.json().catch(()=>({}));if(r.ok&&d.authorized){await showStartPermission();return true}}catch(_){}return false}
 async function useSavedDeviceAccount(){
