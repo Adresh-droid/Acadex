@@ -909,6 +909,14 @@ app.delete('/api/teacher/drafts/:id', async(req,res)=>{
 });
 
 
+async function getOwnedClassroomIds(queryable,ownerUserId,rawIds){
+  if(!Array.isArray(rawIds)||rawIds.length>20||rawIds.some(id=>typeof id!=='string'||!id.trim()))return null;
+  const ids=[...new Set(rawIds.map(id=>id.trim()))];
+  if(!ids.length)return [];
+  const found=await queryable.query('SELECT id FROM classrooms WHERE owner_user_id=$1 AND id=ANY($2::text[])',[ownerUserId,ids]);
+  return found.rows.length===ids.length?ids:null;
+}
+
 const CLASSROOM_JOIN_CODE_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeClassroomJoinCode(){
   let code='';
