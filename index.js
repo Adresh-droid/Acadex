@@ -464,6 +464,15 @@ async function initDatabase(){
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS archived_at BIGINT NULL;
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS peers_visible BOOLEAN NOT NULL DEFAULT true;
   
+    CREATE TABLE IF NOT EXISTS exam_drafts (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT '',
+      data_json JSONB NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_exam_drafts_owner_updated
+      ON exam_drafts(owner_user_id, updated_at DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_submissions_public_result_token ON exam_submissions(public_result_token) WHERE public_result_token IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_exam ON exam_submissions(exam_id);
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_student ON exam_submissions(exam_id, student_id);
@@ -753,6 +762,81 @@ app.delete('/api/teacher/folders/:id', async(req,res)=>{
     res.json({ok:true});
   }catch(err){console.error(err);res.status(500).json({error:'Could not delete folder.'});}
 });
+
+app.get('/api/teacher/drafts', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const {rows}=await pool.query(
+      'SELECT id,title,data_json,updated_at FROM exam_drafts WHERE owner_user_id=$1 ORDER BY updated_at DESC LIMIT 50',
+      [u.id]
+    );
+    res.json({drafts:rows.map(x=>({id:x.id,title:x.title,updatedAt:Number(x.updated_at),data:x.data_json}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load drafts.'});}
+});
+app.put('/api/teacher/drafts/:id', async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const id=String(req.params.id||'');
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return res.status(400).json({error:'Invalid draft id.'});
+    const body=req.body||{};
+    if(body.title!==undefined&&typeof body.title!=='string')return res.status(400).json({error:'Title must be a string.'});
+    const title=String(body.title===undefined?'':body.title).trim();
+    if(title.length>120)return res.status(400).json({error:'Title must be 120 characters or fewer.'});
+    const data=body.data;
+    let serialized;
+    try{
+      const proto=data&&typeof data==='object'?Object.getPrototypeOf(data):null;
+      if(!data||typeof data!=='object'||Array.isArray(data)||(proto!==Object.prototype&&proto!==null))return res.status(400).json({error:'Data must be a JSON object.'});
+      serialized=JSON.stringify(data);
+      if(typeof serialized!=='string'||Buffer.byteLength(serialized,'utf8')>512*1024)return res.status(400).json({error:'Draft data must be 512 KB or smaller.'});
+    }catch(_){return res.status(400).json({error:'Data must be a valid JSON object.'});}
+
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[u.id]);
+    const collision=await client.query('SELECT owner_user_id FROM exam_drafts WHERE id=$1',[id]);
+    if(collision.rows[0]&&collision.rows[0].owner_user_id!==u.id){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Draft not found.'});
+    }
+    if(!collision.rows[0]){
+      const count=await client.query('SELECT COUNT(*)::int AS count FROM exam_drafts WHERE owner_user_id=$1',[u.id]);
+      if(Number(count.rows[0]?.count||0)>=50){
+        await client.query('ROLLBACK');
+        return res.status(400).json({error:'Too many drafts.'});
+      }
+    }
+    const updatedAt=Date.now();
+    const saved=await client.query(
+      `INSERT INTO exam_drafts(id,owner_user_id,title,data_json,updated_at)
+       VALUES($1,$2,$3,$4::jsonb,$5)
+       ON CONFLICT(id) DO UPDATE
+         SET title=EXCLUDED.title,data_json=EXCLUDED.data_json,updated_at=EXCLUDED.updated_at
+         WHERE exam_drafts.owner_user_id=EXCLUDED.owner_user_id
+       RETURNING id,updated_at`,
+      [id,u.id,title,serialized,updatedAt]
+    );
+    if(!saved.rows[0]){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Draft not found.'});
+    }
+    await client.query('COMMIT');
+    res.json({id:saved.rows[0].id,updatedAt:Number(saved.rows[0].updated_at)});
+  }catch(err){
+    try{await client.query('ROLLBACK')}catch(_){}
+    console.error(err);res.status(500).json({error:'Could not save draft.'});
+  }finally{client.release();}
+});
+app.delete('/api/teacher/drafts/:id', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const id=String(req.params.id||'');
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return res.status(400).json({error:'Invalid draft id.'});
+    await pool.query('DELETE FROM exam_drafts WHERE id=$1 AND owner_user_id=$2',[id,u.id]);
+    res.json({ok:true});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not delete draft.'});}
+});
+
 app.get('/api/teacher/exams/:id', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher');if(!u)return;
