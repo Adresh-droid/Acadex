@@ -1,4 +1,4 @@
-const CACHE = 'acadex-v-20260922-1';
+const CACHE = 'acadex-v-20261010-1';
 const STATIC_ASSETS = [
   '/boot.html',
   '/install',
