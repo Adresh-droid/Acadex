@@ -903,36 +903,12 @@ app.delete('/api/teacher/drafts/:id', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher');if(!u)return;
     const id=String(req.params.id||'');
-    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return res.status(400).json({error:'Invalid draft id.'});
     await pool.query('DELETE FROM exam_drafts WHERE id=$1 AND owner_user_id=$2',[id,u.id]);
     res.json({ok:true});
   }catch(err){console.error(err);res.status(500).json({error:'Could not delete draft.'});}
 });
 
 
-async function getOwnedClassroomIds(queryable,ownerUserId,rawIds){
-  if(!Array.isArray(rawIds)||rawIds.length>20||rawIds.some(id=>typeof id!=='string'||!id.trim()))return null;
-  const ids=[...new Set(rawIds.map(id=>id.trim()))];
-  if(!ids.length)return [];
-  const found=await queryable.query('SELECT id FROM classrooms WHERE owner_user_id=$1 AND id=ANY($2::text[])',[ownerUserId,ids]);
-  return found.rows.length===ids.length?ids:null;
-}
-async function insertExamAssignmentNotifications(client,examId,title,classroomIds,teacherName,now){
-  if(!classroomIds.length)return [];
-  const members=await client.query('SELECT DISTINCT ON (cm.student_user_id) cm.student_user_id,c.id AS classroom_id,c.name AS classroom_name FROM classroom_members cm JOIN classrooms c ON c.id=cm.classroom_id WHERE c.id=ANY($1::text[]) AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.user_id=cm.student_user_id AND n.exam_id=$2 AND n.type=\'exam_assigned\') ORDER BY cm.student_user_id,c.created_at ASC,c.id ASC',[classroomIds,examId]);
-  if(!members.rows.length)return [];
-  const notificationIds=members.rows.map(()=>crypto.randomUUID());
-  const userIds=members.rows.map(x=>x.student_user_id);
-  const classIds=members.rows.map(x=>x.classroom_id);
-  const bodies=members.rows.map(x=>String(teacherName||'Teacher')+' shared a new exam with '+x.classroom_name);
-  await client.query('INSERT INTO notifications(id,user_id,type,title,body,exam_id,classroom_id,created_at) SELECT n.id,n.user_id,\'exam_assigned\',$5,n.body,$6,n.classroom_id,$7 FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) AS n(id,user_id,classroom_id,body)',[notificationIds,userIds,classIds,bodies,title,examId,now]);
-  return members.rows.map(x=>({userId:x.student_user_id,classroomId:x.classroom_id,classroomName:x.classroom_name,teacherName:String(teacherName||'Teacher')}));
-}
-function sendAssignmentPushes(notified,title,examId,url){
-  const groups=new Map();
-  for(const n of notified){const key=n.classroomName;const group=groups.get(key)||[];group.push(n.userId);groups.set(key,group);}
-  for(const [classroomName,userIds] of groups){const teacherName=notified.find(n=>n.classroomName===classroomName)?.teacherName||'Teacher';sendPushToUsers(userIds,{title:'New exam: '+title,body:String(teacherName)+' shared an exam with '+classroomName,url,tag:'exam-'+examId});}
-}
 const CLASSROOM_JOIN_CODE_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeClassroomJoinCode(){
   let code='';
