@@ -1821,7 +1821,7 @@ app.get('/result/:publicToken', async(req,res)=>{
 app.get('/exam/:id', async(req, res) => {
   const exam=await getExam(req.params.id,{loadContent:false}); if(!exam) return res.status(404).send('Exam not found');
   const safeId=JSON.stringify(exam.id), safeTitle=JSON.stringify(exam.title);
-  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0e0f13"><link rel="icon" type="image/svg+xml" href="/icons/acadex-favicon.svg"><link rel="shortcut icon" href="/icons/acadex-favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icons/acadex-icon.svg"><title>${escapeHtml(exam.title)}</title>
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(exam.title)}</title>
 <style>
 *{box-sizing:border-box}html, body{margin:0;min-height:100%;font-family:system-ui, -apple-system, "Segoe UI", sans-serif;background:#0d0c0b;color:#f0ece4}.hidden{display:none!important}
 #busyOverlay{display:none;position:fixed;inset:0;z-index:2147483600;align-items:center;justify-content:center;padding:22px;background:rgba(8,8,8,.88);backdrop-filter:blur(12px)}
