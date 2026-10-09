@@ -7,6 +7,7 @@ const fs = require('fs');
 const zlib = require('zlib');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, PutBucketCorsCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const webpush = require('web-push');
 require('dotenv').config( {
   path: '.env.local'
 });
@@ -367,6 +368,22 @@ async function compressStoredPdfs(){
   }
   if(saved)console.log('Compressed '+saved+' existing PDF exam file'+(saved===1?'':'s')+' losslessly.');
 }
+const vapidConfigured=Boolean(process.env.VAPID_PUBLIC_KEY&&process.env.VAPID_PRIVATE_KEY&&process.env.VAPID_SUBJECT);
+let pushEnabled=false;
+if(vapidConfigured){try{webpush.setVapidDetails(process.env.VAPID_SUBJECT,process.env.VAPID_PUBLIC_KEY,process.env.VAPID_PRIVATE_KEY);pushEnabled=true;}catch(err){console.warn('Web push disabled: invalid VAPID configuration:',err.message);}}
+function sendPushToUsers(userIds,payload){
+  if(!pushEnabled||!Array.isArray(userIds)||!userIds.length)return;
+  const unique=[...new Set(userIds.filter(id=>typeof id==='string'&&id))];if(!unique.length)return;
+  (async()=>{
+    const {rows}=await pool.query('SELECT endpoint,p256dh,auth FROM push_subscriptions WHERE user_id=ANY($1::text[])',[unique]);
+    for(let i=0;i<rows.length;i+=20){
+      await Promise.all(rows.slice(i,i+20).map(async sub=>{
+        try{await webpush.sendNotification({endpoint:sub.endpoint,keys:{p256dh:sub.p256dh,auth:sub.auth}},JSON.stringify(payload),{TTL:86400});}
+        catch(err){const status=Number(err.statusCode||err.status||0);if(status===404||status===410){try{await pool.query('DELETE FROM push_subscriptions WHERE endpoint=$1',[sub.endpoint]);}catch(cleanErr){console.warn('Could not remove expired push subscription:',cleanErr.message);}}else console.warn('Web push delivery failed:',err.message||err);}
+      }));
+    }
+  })().catch(err=>console.warn('Web push send failed:',err.message||err));
+}
 async function initDatabase(){
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -464,6 +481,59 @@ async function initDatabase(){
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS archived_at BIGINT NULL;
     ALTER TABLE exams ADD COLUMN IF NOT EXISTS peers_visible BOOLEAN NOT NULL DEFAULT true;
   
+    CREATE TABLE IF NOT EXISTS exam_drafts (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT '',
+      data_json JSONB NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_exam_drafts_owner_updated
+      ON exam_drafts(owner_user_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS classrooms (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      join_code TEXT NOT NULL UNIQUE,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_classrooms_owner ON classrooms(owner_user_id);
+    CREATE TABLE IF NOT EXISTS classroom_members (
+      classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+      student_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      joined_at BIGINT NOT NULL,
+      PRIMARY KEY(classroom_id, student_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_classroom_members_student ON classroom_members(student_user_id);
+    CREATE TABLE IF NOT EXISTS exam_classrooms (
+      exam_id TEXT NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+      classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+      assigned_at BIGINT NOT NULL,
+      PRIMARY KEY(exam_id, classroom_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_exam_classrooms_class_assigned ON exam_classrooms(classroom_id, assigned_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_exam_classrooms_exam ON exam_classrooms(exam_id);
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      exam_id TEXT NULL,
+      classroom_id TEXT NULL,
+      created_at BIGINT NOT NULL,
+      read_at BIGINT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_submissions_public_result_token ON exam_submissions(public_result_token) WHERE public_result_token IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_exam ON exam_submissions(exam_id);
     CREATE INDEX IF NOT EXISTS idx_exam_submissions_student ON exam_submissions(exam_id, student_id);
@@ -636,6 +706,17 @@ app.delete('/api/auth/account', async(req,res)=>{
     const {rows}=await client.query('SELECT password_hash FROM users WHERE id=$1',[u.id]);    if(!rows[0]||!verifyPassword(password,rows[0].password_hash))return res.status(401).json({error:'Password is incorrect.'});
 
     await client.query('BEGIN');
+    if(u.role==='teacher'){
+      const classroomRows=await client.query('SELECT id FROM classrooms WHERE owner_user_id=$1',[u.id]);
+      const classroomIds=classroomRows.rows.map(row=>row.id);
+      await client.query('DELETE FROM notifications WHERE user_id=$1 OR classroom_id=ANY($2::text[])',[u.id,classroomIds]);
+      await client.query('DELETE FROM exam_drafts WHERE owner_user_id=$1',[u.id]);
+      await client.query('DELETE FROM classrooms WHERE owner_user_id=$1',[u.id]);
+    }else if(u.role==='student'){
+      await client.query('DELETE FROM classroom_members WHERE student_user_id=$1',[u.id]);
+      await client.query('DELETE FROM notifications WHERE user_id=$1',[u.id]);
+      await client.query('DELETE FROM push_subscriptions WHERE user_id=$1',[u.id]);
+    }
     const ownedExams=await client.query('SELECT content_object_key,pdf_object_key FROM exams WHERE owner_user_id=$1 AND (content_object_key IS NOT NULL OR pdf_object_key IS NOT NULL)',[u.id]);
     await client.query('DELETE FROM exams WHERE owner_user_id=$1',[u.id]);
     await client.query('DELETE FROM exam_submissions WHERE student_user_id=$1',[u.id]);
@@ -753,6 +834,396 @@ app.delete('/api/teacher/folders/:id', async(req,res)=>{
     res.json({ok:true});
   }catch(err){console.error(err);res.status(500).json({error:'Could not delete folder.'});}
 });
+
+app.get('/api/teacher/drafts', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const {rows}=await pool.query(
+      'SELECT id,title,data_json,updated_at FROM exam_drafts WHERE owner_user_id=$1 ORDER BY updated_at DESC LIMIT 50',
+      [u.id]
+    );
+    res.json({drafts:rows.map(x=>({id:x.id,title:x.title,updatedAt:Number(x.updated_at),data:x.data_json}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load drafts.'});}
+});
+app.put('/api/teacher/drafts/:id', async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const id=String(req.params.id||'');
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return res.status(400).json({error:'Invalid draft id.'});
+    const body=req.body||{};
+    if(body.title!==undefined&&typeof body.title!=='string')return res.status(400).json({error:'Title must be a string.'});
+    const title=String(body.title===undefined?'':body.title).trim();
+    if(title.length>120)return res.status(400).json({error:'Title must be 120 characters or fewer.'});
+    const data=body.data;
+    let serialized;
+    try{
+      const proto=data&&typeof data==='object'?Object.getPrototypeOf(data):null;
+      if(!data||typeof data!=='object'||Array.isArray(data)||(proto!==Object.prototype&&proto!==null))return res.status(400).json({error:'Data must be a JSON object.'});
+      serialized=JSON.stringify(data);
+      if(typeof serialized!=='string'||Buffer.byteLength(serialized,'utf8')>512*1024)return res.status(400).json({error:'Draft data must be 512 KB or smaller.'});
+    }catch(_){return res.status(400).json({error:'Data must be a valid JSON object.'});}
+
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[u.id]);
+    const collision=await client.query('SELECT owner_user_id FROM exam_drafts WHERE id=$1',[id]);
+    if(collision.rows[0]&&collision.rows[0].owner_user_id!==u.id){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Draft not found.'});
+    }
+    if(!collision.rows[0]){
+      const count=await client.query('SELECT COUNT(*)::int AS count FROM exam_drafts WHERE owner_user_id=$1',[u.id]);
+      if(Number(count.rows[0]?.count||0)>=50){
+        await client.query('ROLLBACK');
+        return res.status(400).json({error:'Too many drafts.'});
+      }
+    }
+    const updatedAt=Date.now();
+    const saved=await client.query(
+      `INSERT INTO exam_drafts(id,owner_user_id,title,data_json,updated_at)
+       VALUES($1,$2,$3,$4::jsonb,$5)
+       ON CONFLICT(id) DO UPDATE
+         SET title=EXCLUDED.title,data_json=EXCLUDED.data_json,updated_at=EXCLUDED.updated_at
+         WHERE exam_drafts.owner_user_id=EXCLUDED.owner_user_id
+       RETURNING id,updated_at`,
+      [id,u.id,title,serialized,updatedAt]
+    );
+    if(!saved.rows[0]){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Draft not found.'});
+    }
+    await client.query('COMMIT');
+    res.json({id:saved.rows[0].id,updatedAt:Number(saved.rows[0].updated_at)});
+  }catch(err){
+    try{await client.query('ROLLBACK')}catch(_){}
+    console.error(err);res.status(500).json({error:'Could not save draft.'});
+  }finally{client.release();}
+});
+app.delete('/api/teacher/drafts/:id', async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const id=String(req.params.id||'');
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return res.status(400).json({error:'Invalid draft id.'});
+    await pool.query('DELETE FROM exam_drafts WHERE id=$1 AND owner_user_id=$2',[id,u.id]);
+    res.json({ok:true});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not delete draft.'});}
+});
+
+
+async function getOwnedClassroomIds(queryable,ownerUserId,rawIds){
+  if(!Array.isArray(rawIds)||rawIds.length>20||rawIds.some(id=>typeof id!=='string'||!id.trim()))return null;
+  const ids=[...new Set(rawIds.map(id=>id.trim()))];
+  if(!ids.length)return [];
+  const found=await queryable.query('SELECT id FROM classrooms WHERE owner_user_id=$1 AND id=ANY($2::text[])',[ownerUserId,ids]);
+  return found.rows.length===ids.length?ids:null;
+}
+async function insertExamAssignmentNotifications(client,examId,title,classroomIds,teacherName,now){
+  if(!classroomIds.length)return [];
+  const members=await client.query('SELECT DISTINCT ON (cm.student_user_id) cm.student_user_id,c.id AS classroom_id,c.name AS classroom_name FROM classroom_members cm JOIN classrooms c ON c.id=cm.classroom_id WHERE c.id=ANY($1::text[]) AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.user_id=cm.student_user_id AND n.exam_id=$2 AND n.type=\'exam_assigned\') ORDER BY cm.student_user_id,c.created_at ASC,c.id ASC',[classroomIds,examId]);
+  if(!members.rows.length)return [];
+  const notificationIds=members.rows.map(()=>crypto.randomUUID());
+  const userIds=members.rows.map(x=>x.student_user_id);
+  const classIds=members.rows.map(x=>x.classroom_id);
+  const bodies=members.rows.map(x=>String(teacherName||'Teacher')+' shared a new exam with '+x.classroom_name);
+  await client.query('INSERT INTO notifications(id,user_id,type,title,body,exam_id,classroom_id,created_at) SELECT n.id,n.user_id,\'exam_assigned\',$5,n.body,$6,n.classroom_id,$7 FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) AS n(id,user_id,classroom_id,body)',[notificationIds,userIds,classIds,bodies,title,examId,now]);
+  return members.rows.map(x=>({userId:x.student_user_id,classroomId:x.classroom_id,classroomName:x.classroom_name,teacherName:String(teacherName||'Teacher')}));
+}
+function sendAssignmentPushes(notified,title,examId,url){
+  const groups=new Map();
+  for(const n of notified){const key=n.classroomName;const group=groups.get(key)||[];group.push(n.userId);groups.set(key,group);}
+  for(const [classroomName,userIds] of groups){const teacherName=notified.find(n=>n.classroomName===classroomName)?.teacherName||'Teacher';sendPushToUsers(userIds,{title:'New exam: '+title,body:String(teacherName)+' shared an exam with '+classroomName,url,tag:'exam-'+examId});}
+}
+const CLASSROOM_JOIN_CODE_ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function makeClassroomJoinCode(){
+  let code='';
+  for(let i=0;i<6;i++)code+=CLASSROOM_JOIN_CODE_ALPHABET[crypto.randomInt(0,CLASSROOM_JOIN_CODE_ALPHABET.length)];
+  return code;
+}
+async function teacherClassroomSummary(classroomId,ownerUserId){
+  const {rows}=await pool.query(`
+    SELECT c.id,c.name,c.join_code,c.created_at,
+      (SELECT COUNT(*)::int FROM classroom_members cm WHERE cm.classroom_id=c.id) AS member_count,
+      (SELECT COUNT(*)::int FROM exam_classrooms ce WHERE ce.classroom_id=c.id) AS exam_count
+    FROM classrooms c WHERE c.id=$1 AND c.owner_user_id=$2
+  `,[classroomId,ownerUserId]);
+  const c=rows[0];
+  return c?{id:c.id,name:c.name,joinCode:c.join_code,memberCount:Number(c.member_count||0),examCount:Number(c.exam_count||0),createdAt:Number(c.created_at)}:null;
+}
+
+app.get('/api/teacher/classrooms',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const {rows}=await pool.query(`
+      SELECT c.id,c.name,c.join_code,c.created_at,
+        (SELECT COUNT(*)::int FROM classroom_members cm WHERE cm.classroom_id=c.id) AS member_count,
+        (SELECT COUNT(*)::int FROM exam_classrooms ce WHERE ce.classroom_id=c.id) AS exam_count
+      FROM classrooms c WHERE c.owner_user_id=$1 ORDER BY c.created_at DESC
+    `,[u.id]);
+    res.json({classrooms:rows.map(c=>({id:c.id,name:c.name,joinCode:c.join_code,memberCount:Number(c.member_count||0),examCount:Number(c.exam_count||0),createdAt:Number(c.created_at)}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load classrooms.'});}
+});
+app.post('/api/teacher/classrooms',async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    if(typeof req.body?.name!=='string')return res.status(400).json({error:'Classroom name must be a string.'});
+    const name=req.body.name.trim();
+    if(!name||name.length>60)return res.status(400).json({error:'Classroom name must be 1-60 characters.'});
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[u.id]);
+    const count=await client.query('SELECT COUNT(*)::int AS count FROM classrooms WHERE owner_user_id=$1',[u.id]);
+    if(Number(count.rows[0]?.count||0)>=30){
+      await client.query('ROLLBACK');
+      return res.status(400).json({error:'Too many classrooms.'});
+    }
+    const id=crypto.randomUUID(),createdAt=Date.now();
+    let created=null;
+    for(let attempt=0;attempt<20&&!created;attempt++){
+      const joinCode=makeClassroomJoinCode();
+      const inserted=await client.query(
+        'INSERT INTO classrooms(id,owner_user_id,name,join_code,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(join_code) DO NOTHING RETURNING id,name,join_code,created_at',
+        [id,u.id,name,joinCode,createdAt]
+      );
+      if(inserted.rows[0])created=inserted.rows[0];
+    }
+    if(!created)throw new Error('Could not generate a unique classroom code.');
+    await client.query('COMMIT');
+    res.status(201).json({id:created.id,name:created.name,joinCode:created.join_code,memberCount:0,examCount:0,createdAt:Number(created.created_at)});
+  }catch(err){
+    try{await client.query('ROLLBACK')}catch(_){}
+    console.error(err);res.status(500).json({error:'Could not create classroom.'});
+  }finally{client.release();}
+});
+app.patch('/api/teacher/classrooms/:id',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const body=req.body||{};
+    if(body.name!==undefined&&typeof body.name!=='string')return res.status(400).json({error:'Classroom name must be a string.'});
+    if(body.name!==undefined){
+      const name=body.name.trim();
+      if(!name||name.length>60)return res.status(400).json({error:'Classroom name must be 1-60 characters.'});
+      body.name=name;
+    }
+    if(body.regenerateCode!==undefined&&typeof body.regenerateCode!=='boolean')return res.status(400).json({error:'regenerateCode must be a boolean.'});
+    const current=await pool.query('SELECT id,name,join_code,created_at FROM classrooms WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+    if(!current.rows[0])return res.status(404).json({error:'Classroom not found.'});
+    let updated=null;
+    if(body.regenerateCode===true){
+      for(let attempt=0;attempt<20&&!updated;attempt++){
+        const code=makeClassroomJoinCode();
+        try{
+          const q=await pool.query(
+            'UPDATE classrooms SET name=$1,join_code=$2 WHERE id=$3 AND owner_user_id=$4 RETURNING id,name,join_code,created_at',
+            [body.name===undefined?current.rows[0].name:body.name,code,req.params.id,u.id]
+          );
+          updated=q.rows[0]||null;
+        }catch(err){if(err.code!=='23505')throw err;}
+      }
+      if(!updated)throw new Error('Could not generate a unique classroom code.');
+    }else if(body.name!==undefined){
+      const q=await pool.query('UPDATE classrooms SET name=$1 WHERE id=$2 AND owner_user_id=$3 RETURNING id,name,join_code,created_at',[body.name,req.params.id,u.id]);
+      updated=q.rows[0]||null;
+    }else updated=current.rows[0];
+    if(!updated)return res.status(404).json({error:'Classroom not found.'});
+    const summary=await teacherClassroomSummary(updated.id,u.id);
+    res.json(summary);
+  }catch(err){console.error(err);res.status(500).json({error:'Could not update classroom.'});}
+});
+app.delete('/api/teacher/classrooms/:id',async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    await client.query('BEGIN');
+    const owned=await client.query('SELECT id FROM classrooms WHERE id=$1 AND owner_user_id=$2 FOR UPDATE',[req.params.id,u.id]);
+    if(!owned.rows[0]){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Classroom not found.'});
+    }
+    await client.query('DELETE FROM notifications WHERE classroom_id=$1',[req.params.id]);
+    await client.query('DELETE FROM classrooms WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+    await client.query('COMMIT');
+    res.json({ok:true});
+  }catch(err){try{await client.query('ROLLBACK')}catch(_){}console.error(err);res.status(500).json({error:'Could not delete classroom.'});}
+  finally{client.release();}
+});
+app.get('/api/teacher/classrooms/:id',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const found=await pool.query('SELECT id,name,join_code,created_at FROM classrooms WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+    const c=found.rows[0];if(!c)return res.status(404).json({error:'Classroom not found.'});
+    const [memberRows,examRows]=await Promise.all([
+      pool.query('SELECT u.id AS user_id,u.display_name,u.student_id AS class_name,u.email,cm.joined_at FROM classroom_members cm JOIN users u ON u.id=cm.student_user_id WHERE cm.classroom_id=$1 ORDER BY cm.joined_at ASC,u.display_name ASC',[c.id]),
+      pool.query('SELECT e.id AS exam_id,e.title,e.type,ec.assigned_at,(SELECT COUNT(DISTINCT cm2.student_user_id)::int FROM classroom_members cm2 JOIN exam_submissions sub ON sub.student_user_id=cm2.student_user_id AND sub.exam_id=ec.exam_id WHERE cm2.classroom_id=ec.classroom_id) AS submitted_count,(SELECT COUNT(*)::int FROM classroom_members cm3 WHERE cm3.classroom_id=ec.classroom_id) AS member_count FROM exam_classrooms ec JOIN exams e ON e.id=ec.exam_id WHERE ec.classroom_id=$1 ORDER BY ec.assigned_at DESC',[c.id])
+    ]);
+    res.json({classroom:{id:c.id,name:c.name,joinCode:c.join_code,createdAt:Number(c.created_at)},members:memberRows.rows.map(m=>({userId:m.user_id,displayName:m.display_name,className:m.class_name||null,email:m.email,joinedAt:Number(m.joined_at)})),exams:examRows.rows.map(e=>({examId:e.exam_id,title:e.title,type:e.type,assignedAt:Number(e.assigned_at),submittedCount:Number(e.submitted_count||0),memberCount:Number(e.member_count||0)}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load classroom.'});}
+});
+app.post('/api/teacher/classrooms/:id/members',async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const requested=req.body?.studentUserIds;
+    if(!Array.isArray(requested))return res.status(400).json({error:'studentUserIds must be an array.'});
+    if(requested.some(id=>typeof id!=='string'))return res.status(400).json({error:'studentUserIds must contain user ids as strings.'});
+    const ids=[...new Set(requested.map(id=>id.trim()).filter(Boolean))];
+    await client.query('BEGIN');
+    const classroom=await client.query('SELECT id FROM classrooms WHERE id=$1 AND owner_user_id=$2 FOR UPDATE',[req.params.id,u.id]);
+    if(!classroom.rows[0]){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Classroom not found.'});
+    }
+    const currentResult=await client.query('SELECT student_user_id FROM classroom_members WHERE classroom_id=$1',[req.params.id]);
+    const current=new Set(currentResult.rows.map(x=>x.student_user_id));
+    const eligibleResult=ids.length?await client.query(`
+      SELECT DISTINCT stu.id FROM users stu
+      WHERE stu.id=ANY($1::text[]) AND stu.role='student'
+        AND EXISTS(
+          SELECT 1 FROM exam_submissions s JOIN exams e ON e.id=s.exam_id
+          WHERE s.student_user_id=stu.id AND e.owner_user_id=$2
+        )`,[ids,u.id]):{rows:[]};
+    const eligible=new Set(eligibleResult.rows.map(x=>x.id));
+    const candidates=ids.filter(id=>eligible.has(id)&&!current.has(id));
+    const remaining=Math.max(0,500-current.size);
+    const toAdd=candidates.slice(0,remaining);
+    const skipped=ids.length-toAdd.length;
+    let added=0;
+    if(toAdd.length){
+      const joinedAt=Date.now();
+      const inserted=await client.query(
+        'INSERT INTO classroom_members(classroom_id,student_user_id,joined_at) SELECT $1,x,$3 FROM unnest($2::text[]) AS x ON CONFLICT(classroom_id,student_user_id) DO NOTHING RETURNING student_user_id',
+        [req.params.id,toAdd,joinedAt]
+      );
+      added=inserted.rowCount||0;
+    }
+    await client.query('COMMIT');
+    res.json({added,skipped:Math.max(skipped,ids.length-added)});
+  }catch(err){try{await client.query('ROLLBACK')}catch(_){}console.error(err);res.status(500).json({error:'Could not add classroom members.'});}
+  finally{client.release();}
+});
+app.delete('/api/teacher/classrooms/:id/members/:studentUserId',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'teacher');if(!u)return;
+    const removed=await pool.query(`DELETE FROM classroom_members cm USING classrooms c
+      WHERE cm.classroom_id=c.id AND c.id=$1 AND c.owner_user_id=$2 AND cm.student_user_id=$3
+      RETURNING cm.student_user_id`,[req.params.id,u.id,req.params.studentUserId]);
+    if(!removed.rows[0]){
+      const own=await pool.query('SELECT id FROM classrooms WHERE id=$1 AND owner_user_id=$2',[req.params.id,u.id]);
+      if(!own.rows[0])return res.status(404).json({error:'Classroom not found.'});
+      return res.status(404).json({error:'Classroom member not found.'});
+    }
+    res.json({ok:true});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not remove classroom member.'});}
+});
+
+app.post('/api/student/classrooms/join',async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const code=typeof req.body?.code==='string'?req.body.code.trim().toUpperCase():'';
+    await client.query('BEGIN');
+    const found=await client.query(`SELECT c.id,c.name,c.owner_user_id,t.display_name AS teacher_name
+      FROM classrooms c JOIN users t ON t.id=c.owner_user_id
+      WHERE UPPER(c.join_code)=$1 FOR UPDATE OF c`,[code]);
+    const c=found.rows[0];
+    if(!c){
+      await client.query('ROLLBACK');
+      return res.status(404).json({error:'Invalid classroom code.'});
+    }
+    const already=await client.query('SELECT 1 FROM classroom_members WHERE classroom_id=$1 AND student_user_id=$2',[c.id,u.id]);
+    if(!already.rows[0]){
+      const count=await client.query('SELECT COUNT(*)::int AS count FROM classroom_members WHERE classroom_id=$1',[c.id]);
+      if(Number(count.rows[0]?.count||0)>=500){
+        await client.query('ROLLBACK');
+        return res.status(400).json({error:'Classroom is full.'});
+      }
+      await client.query('INSERT INTO classroom_members(classroom_id,student_user_id,joined_at) VALUES($1,$2,$3) ON CONFLICT(classroom_id,student_user_id) DO NOTHING',[c.id,u.id,Date.now()]);
+    }
+    await client.query('COMMIT');
+    res.json({classroom:{id:c.id,name:c.name,teacherName:c.teacher_name}});
+  }catch(err){try{await client.query('ROLLBACK')}catch(_){}console.error(err);res.status(500).json({error:'Could not join classroom.'});}
+  finally{client.release();}
+});
+app.get('/api/student/classrooms',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const {rows}=await pool.query(`
+      SELECT c.id,c.name,t.display_name AS teacher_name,cm.joined_at,
+        (SELECT COUNT(*)::int FROM exam_classrooms ce JOIN exams e ON e.id=ce.exam_id
+          WHERE ce.classroom_id=c.id AND NOT EXISTS(
+            SELECT 1 FROM exam_submissions s WHERE s.exam_id=e.id AND s.student_user_id=$1
+          )) AS pending_count
+      FROM classroom_members cm JOIN classrooms c ON c.id=cm.classroom_id
+      JOIN users t ON t.id=c.owner_user_id
+      WHERE cm.student_user_id=$1 ORDER BY cm.joined_at DESC
+    `,[u.id]);
+    res.json({classrooms:rows.map(c=>({id:c.id,name:c.name,teacherName:c.teacher_name,joinedAt:Number(c.joined_at),pendingCount:Number(c.pending_count||0)}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load classrooms.'});}
+});
+app.delete('/api/student/classrooms/:id',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    await pool.query('DELETE FROM classroom_members WHERE classroom_id=$1 AND student_user_id=$2',[req.params.id,u.id]);
+    res.json({ok:true});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not leave classroom.'});}
+});
+app.get('/api/student/assignments',async(req,res)=>{
+  try{
+    const u=await requireRole(req,res,'student');if(!u)return;
+    const {rows}=await pool.query('SELECT * FROM (SELECT DISTINCT ON (e.id) e.id AS exam_id,ec.classroom_id,c.name AS classroom_name,t.display_name AS teacher_name,e.title,e.type,e.duration_ms,ec.assigned_at,EXISTS(SELECT 1 FROM exam_submissions sub WHERE sub.exam_id=e.id AND sub.student_user_id=$1) AS done,(SELECT MAX(sub.percentage) FROM exam_submissions sub WHERE sub.exam_id=e.id AND sub.student_user_id=$1) AS best_percentage FROM classroom_members cm JOIN exam_classrooms ec ON ec.classroom_id=cm.classroom_id JOIN classrooms c ON c.id=ec.classroom_id JOIN users t ON t.id=c.owner_user_id JOIN exams e ON e.id=ec.exam_id WHERE cm.student_user_id=$1 ORDER BY e.id,ec.assigned_at ASC,ec.classroom_id ASC) chosen ORDER BY assigned_at DESC',[u.id]);
+    const baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');
+    res.json({assignments:rows.map(a=>({assignmentId:a.exam_id,examId:a.exam_id,title:a.title,type:a.type,durationMs:Number(a.duration_ms),classroomId:a.classroom_id,classroomName:a.classroom_name,teacherName:a.teacher_name,assignedAt:Number(a.assigned_at),url:baseUrl+'/exam/'+encodeURIComponent(a.exam_id),done:Boolean(a.done),bestPercentage:a.best_percentage==null?null:Number(a.best_percentage)}))});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load assignments.'});}
+});
+app.get('/api/notifications',async(req,res)=>{
+  try{
+    const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Login required.'});
+    const raw=req.query.limit===undefined?'30':String(req.query.limit);
+    if(!/^\d+$/.test(raw)||Number(raw)<1)return res.status(400).json({error:'limit must be a positive integer.'});
+    const limit=Math.min(100,Number(raw));
+    const [rowsResult,countResult]=await Promise.all([
+      pool.query('SELECT id,type,title,body,exam_id,classroom_id,created_at,read_at FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2',[u.id,limit]),
+      pool.query('SELECT COUNT(*)::int AS count FROM notifications WHERE user_id=$1 AND read_at IS NULL',[u.id])
+    ]);
+    res.json({notifications:rowsResult.rows.map(n=>({id:n.id,type:n.type,title:n.title,body:n.body,examId:n.exam_id||null,classroomId:n.classroom_id||null,createdAt:Number(n.created_at),readAt:n.read_at==null?null:Number(n.read_at)})),unreadCount:Number(countResult.rows[0]?.count||0)});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not load notifications.'});}
+});
+app.post('/api/notifications/read',async(req,res)=>{
+  try{
+    const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Login required.'});
+    const body=req.body||{},readAt=Date.now();
+    if(body.all===true){
+      await pool.query('UPDATE notifications SET read_at=$1 WHERE user_id=$2 AND read_at IS NULL',[readAt,u.id]);
+      return res.json({ok:true});
+    }
+    if(!Array.isArray(body.ids)||body.ids.some(id=>typeof id!=='string'))return res.status(400).json({error:'Provide ids as an array or set all to true.'});
+    if(body.ids.length)await pool.query('UPDATE notifications SET read_at=$1 WHERE user_id=$2 AND id=ANY($3::text[])',[readAt,u.id,[...new Set(body.ids)]]);
+    res.json({ok:true});
+  }catch(err){console.error(err);res.status(500).json({error:'Could not mark notifications read.'});}
+});
+
+app.get('/api/push/public-key',async(req,res)=>{
+  try{const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Login required.'});res.json({publicKey:pushEnabled?process.env.VAPID_PUBLIC_KEY:null});}
+  catch(err){console.error(err);res.status(500).json({error:'Could not load push public key.'});}
+});
+app.post('/api/push/subscribe',async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Login required.'});
+    const sub=req.body?.subscription,endpoint=sub?.endpoint,p256dh=sub?.keys?.p256dh,auth=sub?.keys?.auth;
+    if(typeof endpoint!=='string'||endpoint.length>600)return res.status(400).json({error:'Invalid push subscription.'});
+    let parsed;try{parsed=new URL(endpoint);}catch(_){return res.status(400).json({error:'Invalid push subscription.'});}
+    if(parsed.protocol!=='https:'||typeof p256dh!=='string'||!p256dh||p256dh.length>200||typeof auth!=='string'||!auth||auth.length>200)return res.status(400).json({error:'Invalid push subscription.'});
+    const now=Date.now();await client.query('BEGIN');
+    await client.query('INSERT INTO push_subscriptions(endpoint,user_id,p256dh,auth,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(endpoint) DO UPDATE SET user_id=EXCLUDED.user_id,p256dh=EXCLUDED.p256dh,auth=EXCLUDED.auth,updated_at=EXCLUDED.updated_at',[endpoint,u.id,p256dh,auth,now]);
+    await client.query('DELETE FROM push_subscriptions WHERE endpoint IN (SELECT endpoint FROM push_subscriptions WHERE user_id=$1 ORDER BY updated_at DESC,created_at DESC,endpoint ASC OFFSET 10)',[u.id]);
+    await client.query('COMMIT');res.json({ok:true});
+  }catch(err){try{await client.query('ROLLBACK')}catch(_){}console.error(err);res.status(500).json({error:'Could not save push subscription.'});}
+  finally{client.release();}
+});
+app.post('/api/push/unsubscribe',async(req,res)=>{
+  try{const u=await getAuthUser(req);if(!u)return res.status(401).json({error:'Login required.'});const endpoint=req.body?.endpoint;if(typeof endpoint==='string'&&endpoint.length<=600)await pool.query('DELETE FROM push_subscriptions WHERE endpoint=$1 AND user_id=$2',[endpoint,u.id]);res.json({ok:true});}
+  catch(err){console.error(err);res.status(500).json({error:'Could not remove push subscription.'});}
+});
 app.get('/api/teacher/exams/:id', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher');if(!u)return;
@@ -760,7 +1231,8 @@ app.get('/api/teacher/exams/:id', async(req,res)=>{
     if(!full||full.owner_user_id!==u.id)return res.status(404).json({error:'Exam not found.'});
     const folder=await pool.query('SELECT name FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[full.folder_id,u.id]);
     const stats=await pool.query('SELECT COUNT(*)::int AS submitted_count,AVG(percentage) AS avg_percentage FROM exam_submissions WHERE exam_id=$1',[full.id]);
-    res.json({id:full.id,title:full.title,type:full.type,pdfDataUrl:full.pdf_data_url||null,questions:parseQuestions(full),studentPassword:full.student_password,durationMs:Number(full.duration_ms),createdAt:Number(full.created_at),folderId:full.folder_id||null,folderName:folder.rows[0]?.name||null,url:(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/exam/'+encodeURIComponent(full.id),submittedCount:Number(stats.rows[0]?.submitted_count||0),avgPercentage:stats.rows[0]?.avg_percentage==null?null:Number(Number(stats.rows[0].avg_percentage).toFixed(2)),passMarkPercent:full.pass_mark_percent==null?null:Number(full.pass_mark_percent),negativeMarking:Number(full.negative_marking||0),resultVisibility:full.result_visibility||'instant',peersVisible:full.peers_visible!==false,archived:Boolean(full.archived_at),archivedAt:full.archived_at==null?null:Number(full.archived_at)});
+    const classroomLinks=await pool.query('SELECT classroom_id FROM exam_classrooms WHERE exam_id=$1 ORDER BY assigned_at ASC',[full.id]);
+    res.json({id:full.id,classroomIds:classroomLinks.rows.map(x=>x.classroom_id),title:full.title,type:full.type,pdfDataUrl:full.pdf_data_url||null,questions:parseQuestions(full),studentPassword:full.student_password,durationMs:Number(full.duration_ms),createdAt:Number(full.created_at),folderId:full.folder_id||null,folderName:folder.rows[0]?.name||null,url:(process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host'))+'/exam/'+encodeURIComponent(full.id),submittedCount:Number(stats.rows[0]?.submitted_count||0),avgPercentage:stats.rows[0]?.avg_percentage==null?null:Number(Number(stats.rows[0].avg_percentage).toFixed(2)),passMarkPercent:full.pass_mark_percent==null?null:Number(full.pass_mark_percent),negativeMarking:Number(full.negative_marking||0),resultVisibility:full.result_visibility||'instant',peersVisible:full.peers_visible!==false,archived:Boolean(full.archived_at),archivedAt:full.archived_at==null?null:Number(full.archived_at)});
   }catch(err){console.error(err);res.status(500).json({error:'Could not load exam.'});}
 });
 
@@ -777,6 +1249,8 @@ app.patch('/api/teacher/exams/:id', async(req,res)=>{
     if(maxAttempts!==null&&(!Number.isInteger(maxAttempts)||maxAttempts<1))return res.status(400).json({error:'maxAttempts must be a positive integer or null'});
     let folderId=e.folder_id||null;
     if(b.folderId!==undefined){folderId=b.folderId===null||b.folderId===''?null:String(b.folderId);if(folderId){const f=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[folderId,u.id]);if(!f.rows[0])return res.status(400).json({error:'Folder not found.'});}}
+    const requestedClassroomIds=b.classroomIds===undefined?undefined:await getOwnedClassroomIds(pool,u.id,b.classroomIds);
+    if(requestedClassroomIds===null)return res.status(400).json({error:'Invalid classroom.'});
     const contentChanged=(type==='pdf'&&(b.pdfDataUrl!==undefined||b.b2Key!==undefined))||(type==='template'&&b.questions!==undefined)||type!==e.type;
     let contentObjectKey=e.content_object_key||e.pdf_object_key||null;
     if(contentChanged){
@@ -789,7 +1263,21 @@ app.patch('/api/teacher/exams/:id', async(req,res)=>{
     }
     await pool.query('UPDATE exams SET title=$1,type=$2,pdf_data_url=NULL,pdf_object_key=NULL,content_object_key=$3,questions_json=NULL,student_password=$4,duration_ms=$5,folder_id=$6,allow_retake=$7,max_attempts=$8,negative_marking=$9,pass_mark_percent=$10,result_visibility=$11,archived_at=$12,peers_visible=$13 WHERE id=$14 AND owner_user_id=$15',[title,type,contentObjectKey,password,duration,folderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,archivedAt,peersVisible,e.id,u.id]);
     if(contentChanged){if(e.content_object_key&&e.content_object_key!==contentObjectKey)await deletePdfFromB2(e.content_object_key);else if(e.pdf_object_key&&e.pdf_object_key!==contentObjectKey)await deletePdfFromB2(e.pdf_object_key);}
+    let notified=[];
+    if(requestedClassroomIds!==undefined){
+      const linkClient=await pool.connect();
+      try{
+        await linkClient.query('BEGIN');
+        const existing=await linkClient.query('SELECT classroom_id FROM exam_classrooms WHERE exam_id=$1 FOR UPDATE',[e.id]);
+        const currentIds=existing.rows.map(x=>x.classroom_id);
+        const addedIds=requestedClassroomIds.filter(id=>!currentIds.includes(id));
+        await linkClient.query('DELETE FROM exam_classrooms WHERE exam_id=$1 AND NOT (classroom_id=ANY($2::text[]))',[e.id,requestedClassroomIds]);
+        if(addedIds.length){const now=Date.now();await linkClient.query('INSERT INTO exam_classrooms(exam_id,classroom_id,assigned_at) SELECT $1,x,$3 FROM unnest($2::text[]) AS x',[e.id,addedIds,now]);notified=await insertExamAssignmentNotifications(linkClient,e.id,title,addedIds,u.display_name,now);}
+        await linkClient.query('COMMIT');
+      }catch(linkErr){try{await linkClient.query('ROLLBACK')}catch(_){}throw linkErr;}finally{linkClient.release();}
+    }
     const baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');
+    if(notified.length)sendAssignmentPushes(notified,title,e.id,baseUrl+'/exam/'+encodeURIComponent(e.id));
     res.json({ok:true,examId:e.id,url:baseUrl+'/exam/'+encodeURIComponent(e.id)});
   }catch(err){console.error(err);res.status(400).json({error:err.message||'Could not save exam changes.'});}
 });
@@ -803,6 +1291,7 @@ app.delete('/api/teacher/exams/:id', async(req,res)=>{
     // B2 is versioned: remove every version/delete marker before removing
     // the database record so an exam delete actually releases stored bytes.
     for(const key of keys)await deletePdfFromB2(key);
+    await pool.query('DELETE FROM exam_classrooms WHERE exam_id=$1',[req.params.id]);
     const result=await pool.query('DELETE FROM exams WHERE id=$1 AND owner_user_id=$2 RETURNING id',[req.params.id,u.id]);
     if(!result.rows[0])return res.status(404).json({error:'Exam not found.'});
     res.json({ok:true,examId:result.rows[0].id});
@@ -887,7 +1376,7 @@ app.get('/api/student/exams/:examId/peers', async(req,res)=>{
   }catch(err){console.error(err);res.status(500).json({error:'Could not load peer results.'});}
 });
 app.get('/api/student/teachers', async(req,res)=>{ try{const u=await requireRole(req,res,'student');if(!u)return; const {rows}=await pool.query(`SELECT DISTINCT t.id,t.email,t.display_name FROM users t JOIN exams e ON e.owner_user_id=t.id JOIN exam_submissions s ON s.exam_id=e.id WHERE s.student_user_id=$1 AND t.role='teacher' ORDER BY t.display_name`,[u.id]); res.json({teachers:rows.map(x=>({id:x.id,email:x.email,displayName:x.display_name}))}); }catch(err){console.error(err);res.status(500).json({error:'Could not load teachers.'});} });
-app.get('/api/teacher/students', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT DISTINCT u.id,u.email,u.display_name,u.student_id FROM users u JOIN exam_submissions s ON s.student_user_id=u.id JOIN exams e ON e.id=s.exam_id WHERE e.owner_user_id=$1 ORDER BY u.display_name`,[u.id]);res.json({students:rows});}catch(err){console.error(err);res.status(500).json({error:'Could not load students.'});} });
+app.get('/api/teacher/students', async(req,res)=>{ try{const u=await requireRole(req,res,'teacher');if(!u)return; const {rows}=await pool.query(`SELECT DISTINCT u.id,u.email,u.display_name,u.student_id FROM users u JOIN exam_submissions s ON s.student_user_id=u.id JOIN exams e ON e.id=s.exam_id WHERE e.owner_user_id=$1 ORDER BY u.display_name`,[u.id]);res.json({students:rows.map(x=>({...x,userId:x.id,className:x.student_id||null}))});}catch(err){console.error(err);res.status(500).json({error:'Could not load students.'});} });
 app.get('/api/teacher/students/:studentId', async(req,res)=>{
   try{
     const u=await requireRole(req,res,'teacher'); if(!u)return;
@@ -1000,10 +1489,17 @@ app.post('/exam/create', async(req,res)=>{
     if(type==='template'){try{normalizedQuestions=normalizeTemplateQuestions(questions)}catch(err){return res.status(400).json({error:err.message})}}
     let safeFolderId=null;
     if(folderId!==null&&folderId!==''){const f=await pool.query('SELECT id FROM exam_folders WHERE id=$1 AND owner_user_id=$2',[String(folderId),user.id]);if(!f.rows[0])return res.status(400).json({error:'Folder not found.'});safeFolderId=String(folderId)}
+    const classroomIds=b.classroomIds===undefined?[]:await getOwnedClassroomIds(pool,user.id,b.classroomIds);
+    if(classroomIds===null)return res.status(400).json({error:'Invalid classroom.'});
     const examId='exam_'+crypto.randomBytes(12).toString('hex');
     const contentObjectKey=type==='pdf'?(b.b2Key?String(b.b2Key):await uploadPdfToB2(examId,pdfDataUrl)):await uploadTemplateToB2(examId,normalizedQuestions);
     await pool.query(`INSERT INTO exams(id,title,type,pdf_data_url,pdf_object_key,content_object_key,questions_json,student_password,duration_ms,created_at,owner_user_id,folder_id,allow_retake,max_attempts,negative_marking,pass_mark_percent,result_visibility,archived_at,peers_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,[examId,title,type,null,null,contentObjectKey,null,studentPassword,durationMs,Date.now(),user.id,safeFolderId,allowRetake,maxAttempts,negativeMarking,passMarkPercent,resultVisibility,null,peersVisible]);
-    const baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');res.json({examId,url:baseUrl+'/exam/'+examId});
+    const now=Date.now(),baseUrl=process.env.PUBLIC_BASE_URL||req.protocol+'://'+req.get('host');
+    const assignmentClient=await pool.connect();let notified=[];
+    try{await assignmentClient.query('BEGIN');if(classroomIds.length)await assignmentClient.query('INSERT INTO exam_classrooms(exam_id,classroom_id,assigned_at) SELECT $1,x,$3 FROM unnest($2::text[]) AS x',[examId,classroomIds,now]);notified=await insertExamAssignmentNotifications(assignmentClient,examId,title,classroomIds,user.display_name,now);await assignmentClient.query('COMMIT');}
+    catch(linkErr){try{await assignmentClient.query('ROLLBACK')}catch(_){}throw linkErr;}finally{assignmentClient.release();}
+    if(notified.length)sendAssignmentPushes(notified,title,examId,baseUrl+'/exam/'+encodeURIComponent(examId));
+    res.json({examId,url:baseUrl+'/exam/'+encodeURIComponent(examId)});
   }catch(error){console.error('Create exam error:',error);res.status(400).json({error:error.message||'Failed to create exam'});}
 });
 app.get('/api/exam/:id', async(req, res) => {
@@ -1320,7 +1816,7 @@ app.get('/result/:publicToken', async(req,res)=>{
 app.get('/exam/:id', async(req, res) => {
   const exam=await getExam(req.params.id,{loadContent:false}); if(!exam) return res.status(404).send('Exam not found');
   const safeId=JSON.stringify(exam.id), safeTitle=JSON.stringify(exam.title);
-  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(exam.title)}</title>
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0e0f13"><link rel="icon" type="image/svg+xml" href="/icons/acadex-favicon.svg"><link rel="shortcut icon" href="/icons/acadex-favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icons/acadex-icon.svg"><title>${escapeHtml(exam.title)}</title>
 <style>
 *{box-sizing:border-box}html, body{margin:0;min-height:100%;font-family:system-ui, -apple-system, "Segoe UI", sans-serif;background:#0d0c0b;color:#f0ece4}.hidden{display:none!important}
 #busyOverlay{display:none;position:fixed;inset:0;z-index:2147483600;align-items:center;justify-content:center;padding:22px;background:rgba(8,8,8,.88);backdrop-filter:blur(12px)}
