@@ -6,21 +6,23 @@ namespace Acadex.Windows.Services;
 /// <summary>Stores the access token encrypted for the current Windows user.</summary>
 public sealed class SessionStore
 {
-    private const string TokenFileName = "session.bin";
     private readonly string _directory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Acadex");
 
-    private string TokenPath => Path.Combine(_directory, TokenFileName);
+    private string TokenPath => Path.Combine(_directory, "session.bin");
 
     public async Task SaveAsync(string token, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
         Directory.CreateDirectory(_directory);
         var plain = Encoding.UTF8.GetBytes(token);
-        var protectedBytes = ProtectedData.Protect(plain, optionalEntropy: null, DataProtectionScope.CurrentUser);
-        await File.WriteAllBytesAsync(TokenPath, protectedBytes, cancellationToken);
-        CryptographicOperations.ZeroMemory(plain);
+        try
+        {
+            var protectedBytes = ProtectedData.Protect(plain, optionalEntropy: null, DataProtectionScope.CurrentUser);
+            await File.WriteAllBytesAsync(TokenPath, protectedBytes, cancellationToken);
+        }
+        finally { CryptographicOperations.ZeroMemory(plain); }
     }
 
     public async Task<string?> LoadAsync(CancellationToken cancellationToken = default)
@@ -35,7 +37,6 @@ public sealed class SessionStore
         }
         catch (CryptographicException)
         {
-            // A token encrypted for another Windows profile is unusable. Clear it.
             Delete();
             return null;
         }
@@ -46,5 +47,11 @@ public sealed class SessionStore
         try { if (File.Exists(TokenPath)) File.Delete(TokenPath); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    public Task DeleteAsyncSafe()
+    {
+        Delete();
+        return Task.CompletedTask;
     }
 }
