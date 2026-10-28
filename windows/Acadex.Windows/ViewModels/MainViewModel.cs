@@ -55,6 +55,7 @@ public sealed class MainViewModel : ViewModelBase
     public ObservableCollection<DraftItem> Drafts { get; } = new();
     public ObservableCollection<PeerItem> Peers { get; } = new();
     public ObservableCollection<AttemptItem> TeacherResults { get; } = new();
+    public int TotalSubmissions => Exams.Sum(x => x.SubmittedCount);
 
     public MainViewModel(AcadexApiClient api, SessionStore sessionStore)
     {
@@ -306,6 +307,7 @@ public sealed class MainViewModel : ViewModelBase
     {
         var response = await _api.GetJsonAsync<TeacherExamsResponse>("api/teacher/exams", cancellationToken: ct);
         Replace(Exams, response.Exams);
+        Raise(nameof(TotalSubmissions));
     }
     private async Task LoadFoldersAsync(CancellationToken ct)
     {
