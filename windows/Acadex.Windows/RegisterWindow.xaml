@@ -1,0 +1,27 @@
+<Window x:Class="Acadex.Windows.RegisterWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create your Acadex account" Width="520" Height="660" MinWidth="500" MinHeight="620"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize" Background="{StaticResource WindowBrush}"
+        Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <Grid Margin="28">
+      <StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,22">
+          <Border Width="44" Height="44" CornerRadius="13" Background="{StaticResource AccentBrush}" Margin="0,0,12,0">
+            <TextBlock Text="A" FontSize="27" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <StackPanel VerticalAlignment="Center"><TextBlock Text="Create an account" FontSize="24" FontWeight="SemiBold"/><TextBlock Text="Join Acadex" Foreground="{StaticResource MutedBrush}"/></StackPanel>
+        </StackPanel>
+        <TextBlock Text="Account type"/><ComboBox x:Name="RoleBox" SelectedIndex="0" Padding="9" Margin="0,4,0,12"><ComboBoxItem Content="Student" Tag="student"/><ComboBoxItem Content="Teacher" Tag="teacher"/></ComboBox>
+        <TextBlock Text="Full name"/><TextBox x:Name="NameBox"/>
+        <TextBlock Text="Email"/><TextBox x:Name="EmailBox"/>
+        <TextBlock Text="Password (minimum 6 characters)"/><PasswordBox x:Name="PasswordInput"/>
+        <TextBlock Text="Class / Grade (students only)"/><TextBox x:Name="ClassBox"/>
+        <Border Background="#422026" CornerRadius="8" Padding="10" Margin="0,0,0,12" Visibility="Collapsed" x:Name="ErrorPanel"><TextBlock x:Name="ErrorText" Foreground="#FF9A9A" TextWrapping="Wrap"/></Border>
+        <Button Content="Create account" Background="{StaticResource AccentBrush}" Click="CreateAccount_Click" Height="44" HorizontalAlignment="Stretch"/>
+        <Button Content="Cancel" Click="Cancel_Click" HorizontalAlignment="Stretch" Margin="0,10,0,0"/>
+      </StackPanel>
+    </Grid>
+  </ScrollViewer>
+</Window>

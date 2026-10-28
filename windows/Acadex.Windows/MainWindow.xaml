@@ -1,0 +1,345 @@
+<Window x:Class="Acadex.Windows.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Acadex" Width="1260" Height="820" MinWidth="980" MinHeight="650"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBrush}"
+        Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI" FontSize="13">
+  <Window.Resources>
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Padding" Value="18"/>
+      <Setter Property="Margin" Value="0,0,0,14"/>
+    </Style>
+    <Style x:Key="SectionTitle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="16"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="Background" Value="{StaticResource PanelBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+      <Setter Property="RowBackground" Value="{StaticResource PanelBrush}"/>
+      <Setter Property="AlternatingRowBackground" Value="{StaticResource PanelAltBrush}"/>
+      <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+      <Setter Property="HeadersVisibility" Value="Column"/>
+      <Setter Property="CanUserAddRows" Value="False"/>
+      <Setter Property="AutoGenerateColumns" Value="False"/>
+      <Setter Property="IsReadOnly" Value="True"/>
+      <Setter Property="SelectionMode" Value="Single"/>
+      <Setter Property="RowHeaderWidth" Value="0"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background" Value="{StaticResource PanelAltBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+      <Setter Property="Padding" Value="12,10"/>
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="Padding" Value="10,8"/>
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+    </Style>
+    <Style TargetType="ListBox">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style TargetType="ListBoxItem">
+      <Setter Property="Padding" Value="10,8"/>
+      <Setter Property="Margin" Value="0,2"/>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="Root" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsSelected" Value="True"><Setter TargetName="Root" Property="Background" Value="#292B49"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Root" Property="Background" Value="#222532"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="238"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border Grid.Column="0" Background="#151720" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0" Padding="16">
+      <DockPanel LastChildFill="True">
+        <StackPanel DockPanel.Dock="Top">
+          <StackPanel Orientation="Horizontal" Margin="4,4,4,28">
+            <Border Width="38" Height="38" CornerRadius="12" Background="{StaticResource AccentBrush}" Margin="0,0,10,0">
+              <TextBlock Text="A" FontSize="23" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="ACADEX" FontSize="19" FontWeight="Bold"/>
+              <TextBlock Text="EXAM PLATFORM" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+            </StackPanel>
+          </StackPanel>
+          <TextBlock Text="WORKSPACE" Margin="8,0,0,8" Foreground="{StaticResource MutedBrush}" FontSize="10" FontWeight="Bold"/>
+          <Button Content="Overview" Tag="Home" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left"/>
+          <Button Content="Exams" Tag="Exams" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left"/>
+          <Button Content="Results" Tag="Results" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left"/>
+          <Button Content="Students / teachers" Tag="Students" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left"/>
+          <Button Content="Folders" Tag="Folders" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left" Visibility="{Binding IsTeacher, Converter={StaticResource BoolToVisibility}}"/>
+          <Button Content="Drafts" Tag="Drafts" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left" Visibility="{Binding IsTeacher, Converter={StaticResource BoolToVisibility}}"/>
+          <Button Content="Create exam" Tag="Create" Click="Navigate_Click" Margin="0,2" HorizontalContentAlignment="Left" Visibility="{Binding IsTeacher, Converter={StaticResource BoolToVisibility}}"/>
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Bottom">
+          <Button Content="Settings" Tag="Settings" Click="Navigate_Click" HorizontalContentAlignment="Left"/>
+          <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="2,14,2,4" Margin="0,14,0,0">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="38"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Border Width="34" Height="34" CornerRadius="12" Background="#2A2D42"><TextBlock Text="{Binding UserInitials}" VerticalAlignment="Center" HorizontalAlignment="Center" FontWeight="Bold"/></Border>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="9,0,0,0">
+                <TextBlock Text="{Binding UserName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding UserRole}" FontSize="10" Foreground="{StaticResource MutedBrush}"/>
+              </StackPanel>
+              <Button Grid.Column="2" Content="↪" ToolTip="Sign out" Padding="9,5" Margin="3,0,0,0" Command="{Binding LogoutCommand}"/>
+            </Grid>
+          </Border>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <Grid Grid.Column="1">
+      <Grid.RowDefinitions><RowDefinition Height="76"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="28"/></Grid.RowDefinitions>
+      <Border Grid.Row="0" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="26,16">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="{Binding PageTitle}" FontSize="23" FontWeight="SemiBold"/>
+            <TextBlock Text="{Binding Status}" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,2,0,0"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Content="Refresh" Command="{Binding RefreshCommand}"/>
+            <Button Content="Connect" Command="{Binding ConnectCommand}"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+      <StackPanel Grid.Row="1" Margin="24,16,24,0">
+        <Border Background="#422026" CornerRadius="8" Padding="12" Margin="0,0,0,8" Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}">
+          <TextBlock Text="{Binding Error}" Foreground="#FF9A9A" TextWrapping="Wrap"/>
+        </Border>
+        <Border Background="#17352E" CornerRadius="8" Padding="12" Margin="0,0,0,8" Visibility="{Binding HasSuccess, Converter={StaticResource BoolToVisibility}}">
+          <TextBlock Text="{Binding Success}" Foreground="#80E3B9" TextWrapping="Wrap"/>
+        </Border>
+        <ProgressBar Height="3" IsIndeterminate="True" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}"/>
+      </StackPanel>
+
+      <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="24,10,24,20">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+
+          <!-- Sign-in panel -->
+          <Border Grid.Row="0" Style="{StaticResource Card}" Visibility="{Binding IsGuest, Converter={StaticResource BoolToVisibility}}">
+            <Grid MaxWidth="720" HorizontalAlignment="Left">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="1.15*"/><ColumnDefinition Width="1*"/></Grid.ColumnDefinitions>
+              <StackPanel Margin="0,0,24,0">
+                <TextBlock Text="Welcome to Acadex" FontSize="27" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                <TextBlock Text="Your exams, progress and teaching workspace — in one native Windows app." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,22"/>
+                <TextBlock Text="Email" Foreground="{StaticResource MutedBrush}"/>
+                <TextBox Text="{Binding Email, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="Password" Foreground="{StaticResource MutedBrush}"/>
+                <PasswordBox x:Name="LoginPassword" PasswordChanged="LoginPassword_PasswordChanged"/>
+                <StackPanel Orientation="Horizontal">
+                  <Button Content="Sign in" Background="{StaticResource AccentBrush}" Command="{Binding LoginCommand}"/>
+                  <Button Content="Create account" Click="RegisterToggle_Click"/>
+                </StackPanel>
+              </StackPanel>
+              <Border Grid.Column="1" Background="#202236" CornerRadius="12" Padding="20">
+                <StackPanel>
+                  <TextBlock Text="A focused desktop workspace" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                  <TextBlock Text="•  Student results and exam access&#10;•  Teacher exam management&#10;•  Native navigation and status feedback&#10;•  Secure session storage" Foreground="{StaticResource MutedBrush}" Margin="0,12" LineHeight="25"/>
+                  <TextBlock Text="Server" FontWeight="SemiBold"/>
+                  <TextBox Text="{Binding ApiUrl, UpdateSourceTrigger=PropertyChanged}"/>
+                  <Button Content="Check connection" Command="{Binding ConnectCommand}" HorizontalAlignment="Left"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </Border>
+
+          <!-- Main authenticated surface -->
+          <StackPanel Grid.Row="1" Visibility="{Binding IsAuthenticated, Converter={StaticResource BoolToVisibility}}">
+            <Grid Visibility="{Binding IsTeacher, Converter={StaticResource BoolToVisibility}}">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Border Style="{StaticResource Card}" Margin="0,0,12,14">
+                <StackPanel><TextBlock Text="Your exams" Foreground="{StaticResource MutedBrush}"/><TextBlock Text="{Binding Exams.Count}" FontSize="30" FontWeight="Bold" Margin="0,6,0,0"/><TextBlock Text="Created by you" FontSize="11" Foreground="{StaticResource MutedBrush}"/></StackPanel>
+              </Border>
+              <Border Grid.Column="1" Style="{StaticResource Card}" Margin="0,0,12,14">
+                <StackPanel><TextBlock Text="Submissions" Foreground="{StaticResource MutedBrush}"/><TextBlock Text="{Binding TotalSubmissions}" FontSize="30" FontWeight="Bold" Margin="0,6,0,0"/><TextBlock Text="Across your exams" FontSize="11" Foreground="{StaticResource MutedBrush}"/></StackPanel>
+              </Border>
+              <Border Grid.Column="2" Style="{StaticResource Card}" Margin="0,0,0,14">
+                <StackPanel><TextBlock Text="Students" Foreground="{StaticResource MutedBrush}"/><TextBlock Text="{Binding Students.Count}" FontSize="30" FontWeight="Bold" Margin="0,6,0,0"/><TextBlock Text="Who submitted to you" FontSize="11" Foreground="{StaticResource MutedBrush}"/></StackPanel>
+              </Border>
+            </Grid>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding IsTeacher, Converter={StaticResource BoolToVisibility}}">
+              <StackPanel>
+                <TextBlock Text="Exam workspace" Style="{StaticResource SectionTitle}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                  <Button Content="Create exam" Background="{StaticResource AccentBrush}" Tag="Create" Click="Navigate_Click"/>
+                  <Button Content="View results" Command="{Binding LoadTeacherResultsCommand}"/>
+                  <Button Content="Open detail" Command="{Binding OpenExamCommand}"/>
+                  <Button Content="Delete exam" Command="{Binding DeleteExamCommand}"/>
+                </StackPanel>
+                <DataGrid ItemsSource="{Binding Exams}" SelectedItem="{Binding SelectedExam}" Height="250">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Exam" Binding="{Binding Title}" Width="2*"/>
+                    <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="*"/>
+                    <DataGridTextColumn Header="Attempts" Binding="{Binding Attempts}" Width="*"/>
+                    <DataGridTextColumn Header="Submitted" Binding="{Binding SubmittedCount}" Width="*"/>
+                    <DataGridTextColumn Header="Average" Binding="{Binding AvgPercentage, StringFormat={}{0:F1}%}" Width="*"/>
+                    <DataGridCheckBoxColumn Header="Archived" Binding="{Binding Archived}" Width="*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding IsStudent, Converter={StaticResource BoolToVisibility}}">
+              <StackPanel>
+                <TextBlock Text="Open an exam" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Use the exam ID from the hosted Acadex link. Your account and exam password are still verified by the backend." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <Button Content="Enter exam ID and start" Command="{Binding LaunchExamCommand}" Background="{StaticResource AccentBrush}" HorizontalAlignment="Left" Margin="0,0,0,18"/>
+                <TextBlock Text="Your results" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Completed template exams and released grades appear here." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
+                <DataGrid ItemsSource="{Binding StudentResults}" SelectedItem="{Binding SelectedStudentResult}" Height="260">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Exam" Binding="{Binding Title}" Width="2*"/>
+                    <DataGridTextColumn Header="Score" Binding="{Binding Score}" Width="*"/>
+                    <DataGridTextColumn Header="Total" Binding="{Binding Total}" Width="*"/>
+                    <DataGridTextColumn Header="Percentage" Binding="{Binding Percentage, StringFormat={}{0:F1}%}" Width="*"/>
+                    <DataGridTextColumn Header="Attempts" Binding="{Binding AttemptCount}" Width="*"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Released}" Width="*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <Button Content="View selected result" Command="{Binding LoadStudentResultCommand}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Exams}">
+              <StackPanel>
+                <TextBlock Text="All exams" Style="{StaticResource SectionTitle}"/>
+                <DataGrid ItemsSource="{Binding Exams}" SelectedItem="{Binding SelectedExam}" Height="420">
+                  <DataGrid.Columns><DataGridTextColumn Header="Exam" Binding="{Binding Title}" Width="2*"/><DataGridTextColumn Header="Type" Binding="{Binding Type}"/><DataGridTextColumn Header="Attempts" Binding="{Binding Attempts}"/><DataGridTextColumn Header="Submitted" Binding="{Binding SubmittedCount}"/><DataGridTextColumn Header="Created" Binding="{Binding CreatedAt}"/></DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Create}">
+              <StackPanel>
+                <TextBlock Text="Create a template exam" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="PDF exam uploads are not yet enabled in this first native milestone." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                  <StackPanel Margin="0,0,18,0">
+                    <TextBlock Text="Exam title"/><TextBox Text="{Binding ExamTitle, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Exam password for students"/><TextBox Text="{Binding ExamPassword, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Duration (minutes)"/><TextBox Text="{Binding ExamDurationMinutes, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Question marks"/><TextBox Text="{Binding QuestionMark, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Question text"/><TextBox Text="{Binding QuestionText, UpdateSourceTrigger=PropertyChanged}" Height="90" TextWrapping="Wrap" AcceptsReturn="True"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="Option A"/><TextBox Text="{Binding QuestionA, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Option B"/><TextBox Text="{Binding QuestionB, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Option C"/><TextBox Text="{Binding QuestionC, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Option D"/><TextBox Text="{Binding QuestionD, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Correct answer"/><ComboBox SelectedIndex="{Binding CorrectOption}" Padding="8" Margin="0,4,0,12"><ComboBoxItem Content="Option A"/><ComboBoxItem Content="Option B"/><ComboBoxItem Content="Option C"/><ComboBoxItem Content="Option D"/></ComboBox>
+                    <Button Content="Add question" Command="{Binding NewQuestionCommand}" HorizontalAlignment="Left"/>
+                  </StackPanel>
+                </Grid>
+                <TextBlock Text="{Binding PendingQuestionsText}" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,8,0,18"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                  <StackPanel Margin="0,0,18,0">
+                    <TextBlock Text="Negative marking (0–1)"/><TextBox Text="{Binding NegativeMarking, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Pass mark percentage (optional)"/><TextBox Text="{Binding PassMark, UpdateSourceTrigger=PropertyChanged}"/>
+                    <TextBlock Text="Result visibility"/><ComboBox SelectedValue="{Binding ResultVisibility}" SelectedValuePath="Content" Padding="8" Margin="0,4,0,12"><ComboBoxItem Content="instant"/><ComboBoxItem Content="score_only"/><ComboBoxItem Content="hidden"/></ComboBox>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1">
+                    <CheckBox Content="Allow retakes" IsChecked="{Binding AllowRetake}" Margin="0,8,0,12"/>
+                    <TextBlock Text="Maximum attempts (optional)"/><TextBox Text="{Binding MaxAttempts, UpdateSourceTrigger=PropertyChanged}"/>
+                    <Button Content="Create exam" Background="{StaticResource AccentBrush}" Command="{Binding CreateExamCommand}" HorizontalAlignment="Left" Margin="0,14,0,0"/>
+                  </StackPanel>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Folders}">
+              <StackPanel>
+                <TextBlock Text="Exam folders" Style="{StaticResource SectionTitle}"/>
+                <StackPanel Orientation="Horizontal"><TextBox Width="280" Text="{Binding NewFolderName, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,10"/><Button Content="Create folder" Command="{Binding CreateFolderCommand}"/></StackPanel>
+                <ListBox ItemsSource="{Binding Folders}" SelectedItem="{Binding SelectedFolder}" Height="230">
+                  <ListBox.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding Name}" FontWeight="SemiBold"/><TextBlock Text="{Binding ExamCount, StringFormat={}{0} exams}" Foreground="{StaticResource MutedBrush}" FontSize="11"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+                </ListBox>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0"><TextBox Width="280" Text="{Binding FolderName, UpdateSourceTrigger=PropertyChanged}"/><Button Content="Rename" Command="{Binding RenameFolderCommand}"/><Button Content="Delete" Command="{Binding DeleteFolderCommand}"/></StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Drafts}">
+              <StackPanel>
+                <TextBlock Text="Saved drafts" Style="{StaticResource SectionTitle}"/>
+                <StackPanel Orientation="Horizontal"><TextBox Width="280" Text="{Binding DraftTitle, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,10"/><Button Content="Save current as draft" Command="{Binding SaveDraftCommand}"/><Button Content="Delete selected" Command="{Binding DeleteDraftCommand}"/></StackPanel>
+                <ListBox ItemsSource="{Binding Drafts}" SelectedItem="{Binding SelectedDraft}" Height="260">
+                  <ListBox.ItemTemplate><DataTemplate><StackPanel><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding UpdatedAt}" Foreground="{StaticResource MutedBrush}" FontSize="11"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+                </ListBox>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Results}">
+              <StackPanel>
+                <TextBlock Text="Results workspace" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Teachers: select an exam in Exams and use View results. Students: see released grades above." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
+                <DataGrid ItemsSource="{Binding TeacherResults}" Height="340">
+                  <DataGrid.Columns><DataGridTextColumn Header="Student" Binding="{Binding StudentName}" Width="2*"/><DataGridTextColumn Header="ID" Binding="{Binding StudentId}" Width="*"/><DataGridTextColumn Header="Submitted" Binding="{Binding Submitted}" Width="*"/><DataGridTextColumn Header="Score" Binding="{Binding Score}" Width="*"/><DataGridTextColumn Header="Percentage" Binding="{Binding Percentage}" Width="*"/></DataGrid.Columns>
+                </DataGrid>
+                <Button Content="Show peer ranking" Command="{Binding LoadPeerResultsCommand}" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                <ListBox ItemsSource="{Binding Peers}" Height="170" Margin="0,10,0,0">
+                  <ListBox.ItemTemplate><DataTemplate><DockPanel><TextBlock DockPanel.Dock="Right" Text="{Binding BestPercentage, StringFormat={}{0:F1}%}" FontWeight="SemiBold"/><TextBlock Text="{Binding Rank, StringFormat=#\{0\} }" Margin="0,0,8,0"/><TextBlock Text="{Binding DisplayName}"/></DockPanel></DataTemplate></ListBox.ItemTemplate>
+                </ListBox>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Students}">
+              <StackPanel>
+                <TextBlock Text="Students and teachers" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Teachers see students who submitted an exam. Students see teachers linked to completed exams." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
+                <DataGrid ItemsSource="{Binding Students}" Height="340">
+                  <DataGrid.Columns><DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="2*"/><DataGridTextColumn Header="Email" Binding="{Binding Email}" Width="2*"/><DataGridTextColumn Header="Class / ID" Binding="{Binding ClassName}" Width="*"/></DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Visibility="{Binding CurrentPage, Converter={StaticResource PageVisibility}, ConverterParameter=Settings}">
+              <StackPanel MaxWidth="720" HorizontalAlignment="Left">
+                <TextBlock Text="Settings" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Backend API URL"/><TextBox Text="{Binding ApiUrl, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button Content="Test and save URL" Command="{Binding SaveSettingsCommand}" HorizontalAlignment="Left"/>
+                <Separator Margin="0,22,0,18" Background="{StaticResource BorderBrush}"/>
+                <TextBlock Text="Change password" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Current password"/><PasswordBox x:Name="CurrentPasswordBox" PasswordChanged="CurrentPasswordBox_PasswordChanged"/>
+                <TextBlock Text="New password"/><PasswordBox x:Name="NewPasswordBox" PasswordChanged="NewPasswordBox_PasswordChanged"/>
+                <Button Content="Update password" Command="{Binding ChangePasswordCommand}" HorizontalAlignment="Left"/>
+                <Separator Margin="0,22,0,18" Background="{StaticResource BorderBrush}"/>
+                <TextBlock Text="Delete account" Foreground="{StaticResource DangerBrush}" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Text="This permanently removes your account and associated data." Foreground="{StaticResource MutedBrush}" Margin="0,4,0,10"/>
+                <PasswordBox x:Name="DeleteAccountPasswordBox" PasswordChanged="DeleteAccountPasswordBox_PasswordChanged"/>
+                <Button Content="Permanently delete my account" Command="{Binding DeleteAccountCommand}" Background="#3A2025" BorderBrush="#5A303A" HorizontalAlignment="Left"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </Grid>
+      </ScrollViewer>
+      <Border Grid.Row="3" Background="#151720" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="12,4">
+        <DockPanel>
+          <TextBlock Text="ACADEX · NATIVE WINDOWS CLIENT" FontSize="9" Foreground="{StaticResource MutedBrush}" DockPanel.Dock="Left"/>
+          <TextBlock Text="Connected to hosted backend" FontSize="9" Foreground="{StaticResource MutedBrush}" DockPanel.Dock="Right"/>
+        </DockPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>
