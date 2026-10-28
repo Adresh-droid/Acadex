@@ -111,7 +111,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         CurrentOptions.Clear();
         var question = _questions.ElementAtOrDefault(CurrentIndex);
         if (question is null) return;
-        var options = question.Type == "tf" ? new[] { "True", "False" } : question.Options ?? Array.Empty<string>();
+        var options = question.Type == "tf" ? new[] { "True", "False" } : (question.Options ?? Array.Empty<string>());
         _answers.TryGetValue(CurrentIndex.ToString(), out var chosen);
         var selected = chosen.ValueKind == JsonValueKind.String ? chosen.GetString() : chosen.ValueKind == JsonValueKind.Number ? chosen.ToString() : null;
         for (var i = 0; i < options.Count; i++)
