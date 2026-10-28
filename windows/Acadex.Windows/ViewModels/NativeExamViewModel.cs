@@ -40,8 +40,17 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         Directory.CreateDirectory(_userDataFolder);
 
         _questions = ParseQuestions(session.Questions);
-        for (var i = 0; i < _questions.Count; i++)
-            CurrentOptions.Add(new NativeExamOption(i, string.Empty, false, this));
+        if (session.Progress.ValueKind == JsonValueKind.Object &&
+            session.Progress.TryGetProperty("answers", out var savedAnswers) &&
+            savedAnswers.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in savedAnswers.EnumerateObject())
+                _answers[prop.Name] = prop.Value.Clone();
+        }
+        if (session.Progress.ValueKind == JsonValueKind.Object &&
+            session.Progress.TryGetProperty("currentQuestion", out var savedIndex) &&
+            savedIndex.TryGetInt32(out var index) && _questions.Count > 0)
+            _currentIndex = Math.Clamp(index, 0, _questions.Count - 1);
 
         PreviousCommand = new AsyncCommand(PreviousAsync, () => !IsBusy && CurrentIndex > 0 && IsTemplate);
         NextCommand = new AsyncCommand(NextAsync, () => !IsBusy && CurrentIndex < _questions.Count - 1 && IsTemplate);
@@ -193,11 +202,23 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         var remaining = Math.Max(0, _endAt - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var seconds = remaining / 1000;
         TimerText = $"{seconds / 60:00}:{seconds % 60:00}";
-        if (remaining == 0 && Status != "Submitted")
+        if (remaining == 0 && Status != "Submitted" && Status != "Time expired — submitting")
         {
             Status = "Time expired — submitting";
-            Application.Current.Dispatcher.BeginInvoke(async () => await FinishAsync());
+            _ = FinishAutomaticallyAsync();
         }
+    }
+
+    private async Task FinishAutomaticallyAsync()
+    {
+        await RunBusyAsync(async ct =>
+        {
+            var data = await _service.FinishAsync(_examId, _sessionToken, _answers, ct);
+            Status = "Submitted";
+            _timer.Change(Timeout.Infinite, Timeout.Infinite);
+            Success = GetSummary(data);
+            MessageBox.Show(Success, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
+        });
     }
 
     private async Task RunBusyAsync(Func<CancellationToken, Task> action)
