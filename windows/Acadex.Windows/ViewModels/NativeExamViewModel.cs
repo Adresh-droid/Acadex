@@ -17,7 +17,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
     private readonly long _endAt;
     private readonly string _type;
     private readonly string _userDataFolder;
-    private readonly System.Threading.Timer _timer;
+    private System.Threading.Timer? _timer;
     private readonly Dictionary<string, JsonElement> _answers = new();
     private readonly List<NativeQuestion> _questions;
     private int _currentIndex;
@@ -221,6 +221,20 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         });
     }
 
+    private async Task FinishAutomaticallyAsync()
+    {
+        if (Status == "Submitted") return;
+        await RunBusyAsync(async ct =>
+        {
+            Status = "Time expired — submitting";
+            var data = await _service.FinishAsync(_examId, _sessionToken, _answers, ct);
+            Status = "Submitted";
+            _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+            Success = GetSummary(data);
+            MessageBox.Show(Success, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
+        });
+    }
+
     private async Task RunBusyAsync(Func<CancellationToken, Task> action)
     {
         if (IsBusy) return;
@@ -240,7 +254,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         PreviousCommand.Refresh(); NextCommand.Refresh(); SaveProgressCommand.Refresh(); FinishCommand.Refresh(); DownloadPdfCommand.Refresh();
     }
 
-    public void Dispose() => _timer.Dispose();
+    public void Dispose() => _timer?.Dispose();
 }
 
 public sealed class NativeExamOption : ViewModelBase
