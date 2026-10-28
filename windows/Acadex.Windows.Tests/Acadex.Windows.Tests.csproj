@@ -16,6 +16,6 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..Acadex.WindowsAcadex.Windows.csproj" />
+    <ProjectReference Include="..\\Acadex.Windows\\Acadex.Windows.csproj" />
   </ItemGroup>
 </Project>
