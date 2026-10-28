@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
-using System.Windows.Input;
 using Acadex.Windows.Models;
 using Acadex.Windows.Services;
 
@@ -27,6 +26,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
     private string _success = "";
     private bool _isBusy;
     private string _pdfPath = "";
+    private bool _finishTriggered;
 
     public NativeExamViewModel(NativeExamService service, string examId, ExamSessionResponse session)
     {
@@ -54,12 +54,13 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
 
         PreviousCommand = new AsyncCommand(PreviousAsync, () => !IsBusy && CurrentIndex > 0 && IsTemplate);
         NextCommand = new AsyncCommand(NextAsync, () => !IsBusy && CurrentIndex < _questions.Count - 1 && IsTemplate);
-        SaveProgressCommand = new AsyncCommand(SaveProgressAsync, () => !IsBusy);
-        FinishCommand = new AsyncCommand(FinishAsync, () => !IsBusy);
+        SaveProgressCommand = new AsyncCommand(SaveProgressAsync, () => !IsBusy && Status != "Submitted");
+        FinishCommand = new AsyncCommand(FinishAsync, () => !IsBusy && Status != "Submitted");
         DownloadPdfCommand = new AsyncCommand(DownloadPdfAsync, () => !IsBusy && IsPdf);
         RefreshCurrentQuestion();
         UpdateTimer();
-        _timer = new System.Threading.Timer(_ => Application.Current.Dispatcher.Invoke(UpdateTimer), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _timer = new System.Threading.Timer(_ => Application.Current.Dispatcher.Invoke(UpdateTimer),
+            null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
     public string Title { get; }
@@ -94,7 +95,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
             {
                 var type = q.TryGetProperty("type", out var typeProp) ? typeProp.GetString() ?? "mcq" : "mcq";
                 var text = q.TryGetProperty("text", out var textProp) ? textProp.GetString() ?? "" : "";
-                var options = q.TryGetProperty("options", out var optionProp) && optionProp.ValueKind == JsonValueKind.Array
+                IReadOnlyList<string> options = q.TryGetProperty("options", out var optionProp) && optionProp.ValueKind == JsonValueKind.Array
                     ? optionProp.EnumerateArray().Select(o => o.GetString() ?? "").ToArray() : Array.Empty<string>();
                 var answer = q.TryGetProperty("answer", out var answerProp) && answerProp.TryGetInt32(out var a) ? a : (int?)null;
                 var marks = q.TryGetProperty("marks", out var markProp) && markProp.TryGetDouble(out var m) ? m : 1;
@@ -111,9 +112,10 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         CurrentOptions.Clear();
         var question = _questions.ElementAtOrDefault(CurrentIndex);
         if (question is null) return;
-        var options = question.Type == "tf" ? new[] { "True", "False" } : (question.Options ?? Array.Empty<string>());
+        IReadOnlyList<string> options = question.Type == "tf" ? new[] { "True", "False" } : (question.Options ?? Array.Empty<string>());
         _answers.TryGetValue(CurrentIndex.ToString(), out var chosen);
-        var selected = chosen.ValueKind == JsonValueKind.String ? chosen.GetString() : chosen.ValueKind == JsonValueKind.Number ? chosen.ToString() : null;
+        string? selected = chosen.ValueKind == JsonValueKind.String ? chosen.GetString()
+            : chosen.ValueKind == JsonValueKind.Number ? chosen.ToString() : null;
         for (var i = 0; i < options.Count; i++)
         {
             var value = question.Type == "tf" ? (i == 0 ? "true" : "false") : i.ToString();
@@ -127,7 +129,8 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         if (question is null) return;
         var answer = question.Type == "tf" ? (optionIndex == 0 ? "true" : "false") : optionIndex.ToString();
         _answers[CurrentIndex.ToString()] = JsonSerializer.SerializeToElement(answer);
-        RefreshCurrentQuestion();
+        foreach (var option in CurrentOptions)
+            option.SetSelectedFromOwner(option.Index == optionIndex);
     }
 
     private Task PreviousAsync() { if (CurrentIndex > 0) CurrentIndex--; return Task.CompletedTask; }
@@ -137,13 +140,7 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
     {
         await RunBusyAsync(async ct =>
         {
-            var progress = new
-            {
-                answers = _answers,
-                currentQuestion = CurrentIndex,
-                pdfPage = 1,
-                pdfScrollRatio = 0
-            };
+            var progress = new { answers = _answers, currentQuestion = CurrentIndex, pdfPage = 1, pdfScrollRatio = 0 };
             await _service.SaveProgressAsync(_examId, _sessionToken, progress, ct);
             Success = "Progress saved.";
         });
@@ -151,19 +148,27 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
 
     private async Task FinishAsync()
     {
+        if (Status == "Submitted" || _finishTriggered) return;
         var result = MessageBox.Show("Finish and submit this exam now? You may not be able to start another attempt.",
             "Submit exam", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (result != MessageBoxResult.Yes) return;
+        await SubmitAsync(expired: false);
+    }
+
+    private async Task SubmitAsync(bool expired)
+    {
+        if (_finishTriggered || Status == "Submitted") return;
+        _finishTriggered = true;
         await RunBusyAsync(async ct =>
         {
-            Status = "Submitting exam…";
+            Status = expired ? "Time expired — submitting" : "Submitting exam…";
             var data = await _service.FinishAsync(_examId, _sessionToken, _answers, ct);
             Status = "Submitted";
-            _timer.Change(Timeout.Infinite, Timeout.Infinite);
-            var summary = GetSummary(data);
-            Success = summary;
-            MessageBox.Show(summary, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
+            _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+            Success = GetSummary(data);
+            MessageBox.Show(Success, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
         });
+        if (Status != "Submitted") _finishTriggered = false;
     }
 
     private static string GetSummary(JsonElement data)
@@ -187,9 +192,8 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
                 await stream.CopyToAsync(output, ct);
             PdfPath = path;
             Status = "PDF downloaded";
-            var open = MessageBox.Show("The exam PDF is ready. Open it with your default PDF reader?", "Acadex PDF",
-                MessageBoxButton.YesNo, MessageBoxImage.Information);
-            if (open == MessageBoxResult.Yes)
+            if (MessageBox.Show("The exam PDF is ready. Open it with your default PDF reader?", "Acadex PDF",
+                MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
                 Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         });
     }
@@ -202,37 +206,8 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
         var remaining = Math.Max(0, _endAt - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var seconds = remaining / 1000;
         TimerText = $"{seconds / 60:00}:{seconds % 60:00}";
-        if (remaining == 0 && Status != "Submitted" && Status != "Time expired — submitting")
-        {
-            Status = "Time expired — submitting";
-            _ = FinishAutomaticallyAsync();
-        }
-    }
-
-    private async Task FinishAutomaticallyAsync()
-    {
-        await RunBusyAsync(async ct =>
-        {
-            var data = await _service.FinishAsync(_examId, _sessionToken, _answers, ct);
-            Status = "Submitted";
-            _timer.Change(Timeout.Infinite, Timeout.Infinite);
-            Success = GetSummary(data);
-            MessageBox.Show(Success, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
-        });
-    }
-
-    private async Task FinishAutomaticallyAsync()
-    {
-        if (Status == "Submitted") return;
-        await RunBusyAsync(async ct =>
-        {
-            Status = "Time expired — submitting";
-            var data = await _service.FinishAsync(_examId, _sessionToken, _answers, ct);
-            Status = "Submitted";
-            _timer?.Change(Timeout.Infinite, Timeout.Infinite);
-            Success = GetSummary(data);
-            MessageBox.Show(Success, "Acadex — Submission received", MessageBoxButton.OK, MessageBoxImage.Information);
-        });
+        if (remaining == 0 && Status != "Submitted" && !_finishTriggered)
+            _ = SubmitAsync(expired: true);
     }
 
     private async Task RunBusyAsync(Func<CancellationToken, Task> action)
@@ -260,14 +235,14 @@ public sealed class NativeExamViewModel : ViewModelBase, IDisposable
 public sealed class NativeExamOption : ViewModelBase
 {
     private bool _isChecked;
-    private readonly int _index;
     private readonly NativeExamViewModel _owner;
 
     public NativeExamOption(int index, string text, bool isChecked, NativeExamViewModel owner)
     {
-        _index = index; Text = text; _isChecked = isChecked; _owner = owner;
+        Index = index; Text = text; _isChecked = isChecked; _owner = owner;
     }
 
+    public int Index { get; }
     public string Text { get; }
     public bool IsChecked
     {
@@ -275,7 +250,9 @@ public sealed class NativeExamOption : ViewModelBase
         set
         {
             if (!Set(ref _isChecked, value) || !value) return;
-            _owner.SelectOption(_index);
+            _owner.SelectOption(Index);
         }
     }
+
+    internal void SetSelectedFromOwner(bool value) => Set(ref _isChecked, value);
 }
