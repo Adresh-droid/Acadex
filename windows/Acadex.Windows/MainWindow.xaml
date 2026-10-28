@@ -202,6 +202,9 @@
 
             <Border Style="{StaticResource Card}" Visibility="{Binding IsStudent, Converter={StaticResource BoolToVisibility}}">
               <StackPanel>
+                <TextBlock Text="Open an exam" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="Use the exam ID from the hosted Acadex link. Your account and exam password are still verified by the backend." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <Button Content="Enter exam ID and start" Command="{Binding LaunchExamCommand}" Background="{StaticResource AccentBrush}" HorizontalAlignment="Left" Margin="0,0,0,18"/>
                 <TextBlock Text="Your results" Style="{StaticResource SectionTitle}"/>
                 <TextBlock Text="Completed template exams and released grades appear here." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
                 <DataGrid ItemsSource="{Binding StudentResults}" SelectedItem="{Binding SelectedStudentResult}" Height="260">
