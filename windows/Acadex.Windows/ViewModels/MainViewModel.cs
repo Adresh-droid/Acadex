@@ -242,6 +242,14 @@ public sealed class MainViewModel : ViewModelBase
         });
     }
 
+    public async Task AcceptLoginAsync(AuthResponse response)
+    {
+        _api.SetToken(response.Token);
+        await _sessionStore.SaveAsync(response.Token);
+        ApplyUser(response.User);
+        await RefreshCurrentPageAsync();
+    }
+
     private void ApplyUser(ApiUser user)
     {
         User = user;
