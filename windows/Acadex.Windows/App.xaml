@@ -6,6 +6,8 @@
   <Application.Resources>
     <conv:BoolToVisibilityConverter x:Key="BoolToVisibility"/>
     <conv:PageVisibilityConverter x:Key="PageVisibility"/>
+    <conv:NullToVisibilityConverter x:Key="NullToVisibility"/>
+    <conv:InverseBoolConverter x:Key="InverseBool"/>
     <Color x:Key="AccentColor">#7778F6</Color>
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}"/>
     <SolidColorBrush x:Key="WindowBrush" Color="#111218"/>
