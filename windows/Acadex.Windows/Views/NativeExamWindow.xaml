@@ -1,0 +1,60 @@
+<Window x:Class="Acadex.Windows.Views.NativeExamWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Acadex Exam" Width="1040" Height="780" MinWidth="760" MinHeight="560"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource WindowBrush}" Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI">
+  <Grid Margin="22">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="18" Margin="0,0,0,14">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel><TextBlock Text="{Binding Title}" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0"/></StackPanel>
+        <Border Grid.Column="1" Background="#292B49" CornerRadius="9" Padding="14,8" VerticalAlignment="Center"><TextBlock Text="{Binding TimerText}" FontSize="18" FontWeight="Bold"/></Border>
+      </Grid>
+    </Border>
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="24" Margin="0,0,0,14" Visibility="{Binding IsTemplate, Converter={StaticResource BoolToVisibility}}">
+          <StackPanel>
+            <TextBlock Text="{Binding QuestionCounter}" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12"/>
+            <TextBlock Text="{Binding CurrentQuestionText}" FontSize="23" TextWrapping="Wrap" Margin="0,0,0,22"/>
+            <ItemsControl ItemsSource="{Binding CurrentOptions}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <RadioButton Content="{Binding Text}" IsChecked="{Binding IsChecked, Mode=TwoWay}" GroupName="Answers"
+                               Margin="0,5" Padding="12" FontSize="15" Foreground="{StaticResource TextBrush}"/>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+        <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="24" Visibility="{Binding IsPdf, Converter={StaticResource BoolToVisibility}}">
+          <StackPanel>
+            <TextBlock Text="PDF exam" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <TextBlock Text="The PDF is streamed through the authenticated exam-session endpoint. You can open the downloaded exam document with the system PDF reader." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+            <Button Content="Download exam PDF" Command="{Binding DownloadPdfCommand}" HorizontalAlignment="Left" Margin="0,16,0,0"/>
+            <TextBlock Text="{Binding PdfPath}" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
+          </StackPanel>
+        </Border>
+        <Border Background="#422026" CornerRadius="8" Padding="12" Margin="0,0,0,10" Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}">
+          <TextBlock Text="{Binding Error}" Foreground="#FF9A9A" TextWrapping="Wrap"/>
+        </Border>
+        <Border Background="#17352E" CornerRadius="8" Padding="12" Visibility="{Binding HasSuccess, Converter={StaticResource BoolToVisibility}}">
+          <TextBlock Text="{Binding Success}" Foreground="#80E3B9" TextWrapping="Wrap"/>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+    <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,14,0,0">
+      <DockPanel>
+        <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+          <Button Content="Previous" Command="{Binding PreviousCommand}"/>
+          <Button Content="Next" Command="{Binding NextCommand}"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+          <Button Content="Save progress" Command="{Binding SaveProgressCommand}"/>
+          <Button Content="Finish exam" Background="{StaticResource AccentBrush}" Command="{Binding FinishCommand}"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>
