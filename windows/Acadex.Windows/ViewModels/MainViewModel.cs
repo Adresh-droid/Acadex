@@ -339,19 +339,15 @@ public sealed class MainViewModel : ViewModelBase
 
     private async Task LaunchExamAsync()
     {
-        var examId = Microsoft.VisualBasic.Interaction.InputBox("Enter the exam ID from the Acadex exam link", "Open exam", "exam_");
-        if (string.IsNullOrWhiteSpace(examId)) return;
-        var password = Microsoft.VisualBasic.Interaction.InputBox("Enter the exam password", "Open exam", "");
-        if (string.IsNullOrEmpty(password)) return;
-        await RunBusyAsync(async ct =>
-        {
-            var session = await new NativeExamService(_api).StartOrResumeAsync(examId.Trim(), password, cancellationToken: ct);
-            var window = new Acadex.Windows.Views.NativeExamWindow(new NativeExamService(_api), examId.Trim(), session)
-            { Owner = System.Windows.Application.Current.MainWindow };
-            window.ShowDialog();
-            Success = "Exam window closed.";
-            await RefreshCurrentPageCoreAsync(ct);
-        });
+        var gate = new Acadex.Windows.Views.ExamGateWindow(_api)
+        { Owner = System.Windows.Application.Current.MainWindow };
+        if (gate.ShowDialog() != true || gate.Session is null || string.IsNullOrWhiteSpace(gate.ExamId)) return;
+        using var examService = new NativeExamService(_api);
+        var window = new Acadex.Windows.Views.NativeExamWindow(examService, gate.ExamId, gate.Session)
+        { Owner = System.Windows.Application.Current.MainWindow };
+        window.ShowDialog();
+        Success = "Exam window closed.";
+        await RefreshCurrentPageAsync();
     }
 
     private async Task CreateExamAsync()
