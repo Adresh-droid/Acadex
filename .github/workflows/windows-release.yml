@@ -43,11 +43,9 @@ jobs:
         run: dotnet publish windows/Acadex.Windows/Acadex.Windows.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=true -o windows/publish
 
       - name: Install Inno Setup
-        if: github.event_name != 'pull_request'
         run: choco install innosetup --yes --no-progress
 
       - name: Build installer
-        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $iscc = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
@@ -66,7 +64,7 @@ jobs:
           retention-days: 14
 
       - name: Upload installer artifact
-        if: github.event_name != 'pull_request'
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Acadex-Setup
