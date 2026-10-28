@@ -403,6 +403,26 @@ public sealed class MainViewModel : ViewModelBase
         return Task.CompletedTask;
     }
 
+    private async Task SaveDraftAsync()
+    {
+        if (string.IsNullOrWhiteSpace(DraftTitle)) { Error = "Enter a draft title."; return; }
+        var draftId = "draft_" + Guid.NewGuid().ToString("N");
+        var data = new { type = ExamType, questions = _pendingQuestions.ToArray() };
+        await RunBusyAsync(async ct =>
+        {
+            await _api.SendJsonAsync<JsonElement>(HttpMethod.Put, $"api/teacher/drafts/{draftId}",
+                new { title = DraftTitle.Trim(), data }, cancellationToken: ct);
+            DraftTitle = "";
+            await LoadDraftsAsync(ct);
+            Success = "Draft saved.";
+        });
+    }
+
+    private async Task LoadStudentsAsync()
+    {
+        await RunBusyAsync(LoadStudentsCoreAsync);
+    }
+
     private async Task CreateFolderAsync()
     {
         if (string.IsNullOrWhiteSpace(NewFolderName)) { Error = "Enter a folder name."; return; }
