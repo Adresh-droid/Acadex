@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
+using System.Net.Http;
 using System.Text.Json;
 using Acadex.Windows.Models;
 using Acadex.Windows.Services;
+using Acadex.Windows.Views;
 
 namespace Acadex.Windows.ViewModels;
 
