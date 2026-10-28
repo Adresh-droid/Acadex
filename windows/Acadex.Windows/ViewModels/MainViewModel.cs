@@ -9,6 +9,7 @@ public sealed class MainViewModel : ViewModelBase
 {
     private readonly AcadexApiClient _api;
     private readonly SessionStore _sessionStore;
+    private readonly NativeSettingsStore _settingsStore = new();
     private ApiUser? _user;
     private string _email = "";
     private string _password = "";
@@ -61,6 +62,7 @@ public sealed class MainViewModel : ViewModelBase
     {
         _api = api;
         _sessionStore = sessionStore;
+        _apiUrl = _settingsStore.LoadApiUrl(_apiUrl);
         ConnectCommand = new AsyncCommand(ConnectAsync);
         LoginCommand = new AsyncCommand(LoginAsync, () => !IsBusy && !string.IsNullOrWhiteSpace(Email) && Password.Length > 0);
         RegisterCommand = new AsyncCommand(RegisterAsync, () => !IsBusy);
@@ -508,8 +510,10 @@ public sealed class MainViewModel : ViewModelBase
         {
             _api.SetBaseAddress(ApiUrl);
             var health = await _api.CheckHealthAsync();
+            _settingsStore.SaveApiUrl(_api.BaseAddress.AbsoluteUri);
+            ApiUrl = _api.BaseAddress.AbsoluteUri;
             Status = $"Connected · {health.Version ?? "API online"}";
-            Success = "API URL saved for this session.";
+            Success = "API URL saved.";
         }
         catch (Exception ex) { Error = ex.Message; }
     }
