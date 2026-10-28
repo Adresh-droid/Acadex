@@ -76,8 +76,8 @@
               <TextBlock Text="A" FontSize="23" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <StackPanel VerticalAlignment="Center">
-              <TextBlock Text="ACADEX" FontSize="19" FontWeight="Bold" LetterSpacing="1"/>
-              <TextBlock Text="EXAM PLATFORM" FontSize="9" Foreground="{StaticResource MutedBrush}" LetterSpacing="1"/>
+              <TextBlock Text="ACADEX" FontSize="19" FontWeight="Bold"/>
+              <TextBlock Text="EXAM PLATFORM" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
             </StackPanel>
           </StackPanel>
           <TextBlock Text="WORKSPACE" Margin="8,0,0,8" Foreground="{StaticResource MutedBrush}" FontSize="10" FontWeight="Bold"/>
