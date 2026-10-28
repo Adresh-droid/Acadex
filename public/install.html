@@ -1,33 +1,97 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0e0f13"><link rel="manifest" href="/manifest.json"><title>Install Acadex</title><style>*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#0e0f13;color:#eef0f5;font-family:system-ui,sans-serif}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.card{width:min(420px,100%);padding:30px 24px;text-align:center;background:#17181f;border:1px solid #262832;border-radius:22px}.icon{width:80px;height:80px;border-radius:20px;margin-bottom:18px}h1{margin:0 0 8px}p{color:#a2a6b5;line-height:1.55;font-size:14px;margin:0 0 20px}button{width:100%;border:0;border-radius:12px;padding:13px;background:#8b8df2;color:#fff;font-weight:800}.hint{margin-top:12px;color:#777d90;font-size:12px;line-height:1.5}</style></head><body><script>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e0f13">
+<link rel="manifest" href="/manifest.json">
+<title>Acadex</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:#0e0f13;color:#eef0f5;font-family:Inter,system-ui,-apple-system,sans-serif}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{width:min(520px,100%);padding:clamp(24px,5vw,36px);text-align:center;background:#17181f;border:1px solid #262832;border-radius:22px;box-shadow:0 24px 80px #0003}
+.icon{width:76px;height:76px;object-fit:contain;border-radius:20px;margin:0 auto 18px;display:block}
+h1{margin:0 0 8px;font-size:clamp(24px,5vw,30px);letter-spacing:-.03em}
+.subtitle{color:#a2a6b5;line-height:1.6;font-size:14px;margin:0 auto 22px;max-width:390px}
+.actions{display:grid;gap:12px}
+button,.button{display:flex;align-items:center;justify-content:center;width:100%;min-height:46px;border:1px solid transparent;border-radius:12px;padding:12px 16px;background:#8b8df2;color:#fff;font:800 14px inherit;text-decoration:none;cursor:pointer}
+.secondary{background:#22232d;border-color:#343642;color:#eef0f5}
+.hint{margin-top:14px;color:#8b90a3;font-size:12px;line-height:1.55}
+.section{margin-top:22px;padding-top:20px;border-top:1px solid #292a35;text-align:left}
+.section h2{font-size:14px;margin:0 0 6px}
+.section p{font-size:13px;line-height:1.55;color:#a2a6b5;margin:0}
+#desktop-options,#mobile-options{display:none}
+.badge{display:inline-block;margin-bottom:14px;padding:5px 9px;border:1px solid #393a47;border-radius:999px;color:#bfc1ff;font-size:11px;font-weight:700;letter-spacing:.04em}
+@media(min-width:700px){.card{padding:38px}.actions{grid-template-columns:1fr 1fr}.actions .button{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<script>
 if (matchMedia('(display-mode: standalone)').matches || navigator.standalone === true) {
   location.replace('/boot.html');
 }
-</script><main class="card"><img class="icon" src="/icons/acadex-icon.svg"><h1>Install Acadex</h1><p>Acadex mobile runs as an installed app. Install it to use the full app without browser UI.</p><button id="install">Install Acadex</button><div class="hint" id="hint">If no prompt appears, use your browser menu and choose “Add to Home screen” or “Install app”.</div></main><script>
-let d=null;
-const btn=document.getElementById('install'),hintEl=document.getElementById('hint');
-window.addEventListener('beforeinstallprompt',e=>{
-  e.preventDefault();
-  d=e;
-  btn.textContent='Install Acadex';
-});
-window.addEventListener('appinstalled',()=>{
-  d=null;
-  btn.textContent='Acadex Installed';
-  hintEl.textContent='Acadex has been installed. Open it from your home screen.';
-});
-btn.addEventListener('click',async()=>{
-  if(d){
-    d.prompt();
-    const result=await d.userChoice;
-    d=null;
-    if(result.outcome==='accepted'){
-      btn.textContent='Installing…';
-      hintEl.textContent='Acadex is being added to your home screen.';
-    }else{
-      hintEl.textContent='Install was cancelled. You can tap Install Acadex again.';
-    }
-    return;
+</script>
+<main class="card">
+  <img class="icon" src="/icons/acadex-icon.svg" alt="Acadex" onerror="this.style.display='none'">
+  <h1 id="title">Acadex</h1>
+  <p class="subtitle" id="subtitle">Choose how you want to use Acadex.</p>
+
+  <section id="mobile-options">
+    <div class="badge">MOBILE APP</div>
+    <p class="subtitle">Install Acadex on your phone for a full-screen experience and quick access from your home screen.</p>
+    <div class="actions"><button id="install" type="button">Install Acadex</button></div>
+    <div class="hint" id="hint">If no prompt appears, open your browser menu and choose “Add to Home screen” or “Install app”.</div>
+  </section>
+
+  <section id="desktop-options">
+    <div class="badge">DESKTOP</div>
+    <p class="subtitle">Open the full Acadex workspace in your browser. A dedicated Windows app is planned, but no installer is available yet.</p>
+    <div class="actions">
+      <a class="button" href="/boot.html">Open Acadex</a>
+      <span class="button secondary" aria-disabled="true">Windows app · Coming soon</span>
+    </div>
+    <div class="section">
+      <h2>Already installed Acadex?</h2>
+      <p>Use “Open Acadex” above. It checks the server and waits for a cold start before opening your workspace.</p>
+    </div>
+  </section>
+</main>
+<script>
+(function(){
+  var mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent||'');
+  var standalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone===true;
+  if(standalone){location.replace('/boot.html');return;}
+  var mobileOptions=document.getElementById('mobile-options');
+  var desktopOptions=document.getElementById('desktop-options');
+  document.getElementById('subtitle').textContent=mobile?'Install Acadex on your phone for quick access.':'Choose how you want to use Acadex.';
+  if(mobile){
+    mobileOptions.style.display='block';
+    var deferred=null,btn=document.getElementById('install'),hint=document.getElementById('hint');
+    window.addEventListener('beforeinstallprompt',function(e){e.preventDefault();deferred=e;});
+    window.addEventListener('appinstalled',function(){
+      deferred=null;btn.textContent='Acadex installed';
+      hint.textContent='Acadex has been installed. Open it from your home screen.';
+    });
+    btn.addEventListener('click',async function(){
+      if(!deferred){
+        hint.textContent='No install prompt is available right now. Open your browser menu and choose “Install app” or “Add to Home screen”.';
+        return;
+      }
+      deferred.prompt();
+      var result=await deferred.userChoice;
+      deferred=null;
+      if(result.outcome==='accepted'){
+        btn.textContent='Installing…';
+        hint.textContent='Acadex is being added to your home screen.';
+      }else{
+        hint.textContent='Installation was cancelled. You can try again or use your browser menu.';
+      }
+    });
+  }else{
+    desktopOptions.style.display='block';
   }
-  hintEl.textContent='If the install popup does not appear, open your browser menu and choose “Install app” or “Add to Home screen”.';
-});
-</script></body></html>
+})();
+</script>
+</body>
+</html>
