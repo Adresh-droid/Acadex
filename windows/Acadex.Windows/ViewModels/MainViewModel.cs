@@ -83,6 +83,7 @@ public sealed class MainViewModel : ViewModelBase
         LoadStudentResultCommand = new AsyncCommand(LoadSelectedStudentResultAsync);
         LoadPeerResultsCommand = new AsyncCommand(LoadPeersAsync);
         SaveSettingsCommand = new AsyncCommand(SaveSettingsAsync);
+        LaunchExamCommand = new AsyncCommand(LaunchExamAsync, () => IsStudent && !IsBusy);
     }
 
     public AsyncCommand ConnectCommand { get; }
@@ -107,6 +108,7 @@ public sealed class MainViewModel : ViewModelBase
     public AsyncCommand LoadStudentResultCommand { get; }
     public AsyncCommand LoadPeerResultsCommand { get; }
     public AsyncCommand SaveSettingsCommand { get; }
+    public AsyncCommand LaunchExamCommand { get; }
 
     public ApiUser? User { get => _user; private set { if (Set(ref _user, value)) { Raise(nameof(UserName)); Raise(nameof(UserRole)); Raise(nameof(UserInitials)); } } }
     public string UserName => User?.DisplayName ?? User?.Email ?? "Guest";
@@ -335,6 +337,23 @@ public sealed class MainViewModel : ViewModelBase
         Replace(Students, response.Students);
     }
 
+    private async Task LaunchExamAsync()
+    {
+        var examId = Microsoft.VisualBasic.Interaction.InputBox("Enter the exam ID from the Acadex exam link", "Open exam", "exam_");
+        if (string.IsNullOrWhiteSpace(examId)) return;
+        var password = Microsoft.VisualBasic.Interaction.InputBox("Enter the exam password", "Open exam", "");
+        if (string.IsNullOrEmpty(password)) return;
+        await RunBusyAsync(async ct =>
+        {
+            var session = await new NativeExamService(_api).StartOrResumeAsync(examId.Trim(), password, cancellationToken: ct);
+            var window = new Acadex.Windows.Views.NativeExamWindow(new NativeExamService(_api), examId.Trim(), session)
+            { Owner = System.Windows.Application.Current.MainWindow };
+            window.ShowDialog();
+            Success = "Exam window closed.";
+            await RefreshCurrentPageCoreAsync(ct);
+        });
+    }
+
     private async Task CreateExamAsync()
     {
         if (!IsTeacher) return;
@@ -538,7 +557,7 @@ public sealed class MainViewModel : ViewModelBase
         LoginCommand.Refresh(); RegisterCommand.Refresh(); RefreshCommand.Refresh();
         CreateExamCommand.Refresh(); NewQuestionCommand.Refresh(); CreateFolderCommand.Refresh();
         SaveDraftCommand.Refresh(); LoadStudentsCommand.Refresh(); OpenExamCommand.Refresh(); LoadTeacherResultsCommand.Refresh();
-        RenameFolderCommand.Refresh(); DeleteFolderCommand.Refresh(); DeleteExamCommand.Refresh(); DeleteDraftCommand.Refresh();
+        RenameFolderCommand.Refresh(); DeleteFolderCommand.Refresh(); DeleteExamCommand.Refresh(); DeleteDraftCommand.Refresh(); LaunchExamCommand.Refresh();
     }
 
     private static void Replace<T>(ObservableCollection<T> collection, IEnumerable<T> values)
