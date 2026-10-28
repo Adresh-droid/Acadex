@@ -1,0 +1,24 @@
+<Window x:Class="Acadex.Windows.Views.ExamGateWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Open an Acadex exam" Width="470" Height="360" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource WindowBrush}" Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI">
+  <Grid Margin="26">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <TextBlock Text="Start an exam" FontSize="25" FontWeight="SemiBold" Margin="0,0,0,5"/>
+    <TextBlock Grid.Row="1" Text="Enter the exam ID from the Acadex link and its password. The hosted backend validates both your account and the exam session." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,18"/>
+    <StackPanel Grid.Row="2">
+      <TextBlock Text="Exam ID"/>
+      <TextBox x:Name="ExamIdBox" Text="exam_" />
+      <TextBlock Text="Exam password"/>
+      <PasswordBox x:Name="ExamPasswordBox"/>
+    </StackPanel>
+    <Border Grid.Row="3" Background="#422026" CornerRadius="8" Padding="10" Margin="0,6,0,12" Visibility="Collapsed" x:Name="ErrorPanel">
+      <TextBlock x:Name="ErrorText" Foreground="#FF9A9A" TextWrapping="Wrap"/>
+    </Border>
+    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Content="Cancel" Click="Cancel_Click"/>
+      <Button Content="Continue" Background="{StaticResource AccentBrush}" Click="Continue_Click"/>
+    </StackPanel>
+  </Grid>
+</Window>
