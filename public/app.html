@@ -99,7 +99,6 @@ textarea{min-height:64px;resize:vertical}label{font-size:.8rem;color:var(--soft)
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-chart" viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7"/></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-5.5 7-5.5s7 2 7 5.5M16 4.5a3.5 3.5 0 010 7M18 14.5c2.5.5 4 2.2 4 5"/></symbol>
-<symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16v-5a6 6 0 0112 0v5l2 2H4zM10 21h4"/></symbol>
 <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
 </defs></svg>
 <div class="aur"><i></i><i></i></div>
@@ -216,7 +215,7 @@ shell('<a href="#/exams" class="sub" style="text-decoration:none">← Exams</a><
 (rs.length?rs.map(function(x){var nm=x.studentName||x.student_name||'Student',cl=x.studentId||x.student_id||'',sc=d.pdf?(x.submitted?'Submitted':'In progress'):(Number(x.score)+'/'+Number(x.total)+' · '+Math.round(Number(x.percentage))+'%');
 return '<div class="it" style="cursor:default;align-items:flex-start"><div><b>'+E(nm)+'</b><small>'+E(cl)+(cl?' · ':'')+ago(x.submittedAt||x.submitted_at||x.attemptedAt)+'</small>'+(d.pdf?'':'<div class="row" style="margin-top:8px"><button class="btn s" data-a="rview" data-id="'+E(x.id)+'">View</button><button class="btn s" data-a="rshare" data-u="'+E(x.publicResultUrl||'')+'" data-n="'+E(nm)+'" data-t="'+E(d.exam.title)+'">Share</button></div>')+'</div><span class="sc" style="'+(d.pdf?'font-size:.85rem;color:var(--soft)':'')+'">'+sc+'</span></div>'}).join(''):'<div class="empty">No attempts yet.</div>')+'</div>','exams')}
 var W=null,STEPS=['Details','Questions','Time','Password'];
-function newW(){return{step:0,h:1,m:0,pw:'',type:'template',qs:[],title:'',fid:'',cids:[],edit:null}}
+function newW(){return{step:0,h:1,m:0,pw:'',type:'template',qs:[],title:'',fid:'',edit:null}}
 function sv(){if(W.edit||W.done)return;if(!(W.title||W.qs.length||W.pw))return;if(!W.id)W.id=nid();var c=Object.assign({},W);['pdf','pdfName','done','id','edit'].forEach(function(k){delete c[k]});var x={id:W.id,title:W.title||'',updatedAt:Date.now(),data:c};DR=DR.filter(function(f){return f.id!==W.id});DR.unshift(x);dStore();setSt('Saving…');clearTimeout(draftTimer);draftTimer=setTimeout(function(){dPush(x);if(SRV===false)setSt()},900)}
 var renderDetailsStep=function(){return '<div class="card"><label>Exam title</label><input data-w="title" value="'+E(W.title)+'" placeholder="Biology Mid-Term, Grade 10" maxlength="80"><label>Folder</label><select data-w="fid"><option value="">No folder</option>'+FO.map(function(f){return '<option value="'+E(f.id)+'"'+(W.fid===f.id?' selected':'')+'>'+E(f.name)+'</option>'}).join('')+'</select></div>'};
 function qCard(q,i){var h='<div class="card"><div class="row sp"><b>Q'+(i+1)+' · '+(q.type==='mcq'?'Multiple choice':'True or false')+'</b><button class="btn s d" data-a="rq" data-i="'+i+'">Remove</button></div><textarea data-q="'+i+'" data-k="text" placeholder="Type the question">'+E(q.text)+'</textarea>';
