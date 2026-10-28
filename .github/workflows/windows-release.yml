@@ -43,13 +43,23 @@ jobs:
         run: dotnet publish windows/Acadex.Windows/Acadex.Windows.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=false -p:IncludeNativeLibrariesForSelfExtract=true -o windows/publish
 
       - name: Install Inno Setup
-        run: choco install innosetup --yes --no-progress
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress --force
 
       - name: Build installer
         shell: pwsh
         run: |
-          $iscc = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
-          if (!(Test-Path $iscc)) { throw "Inno Setup compiler missing at $iscc" }
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:ChocolateyInstall\lib\innosetup\tools\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}", "$env:ProgramFiles", "$env:ChocolateyInstall\lib\innosetup" -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $iscc) { throw "Inno Setup compiler ISCC.exe was not found after installation." }
+          Write-Host "Using Inno Setup compiler: $iscc"
           & $iscc "windows/installer/Acadex.iss"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path "windows/installer/Output/Acadex-Setup.exe")) { throw "Installer output was not produced." }
