@@ -113,7 +113,6 @@ public sealed class AcadexApiClient : IDisposable
         {
             using var response = await SendAsync(HttpMethod.Post, "api/auth/logout", true,
                 TimeSpan.FromSeconds(15), cancellationToken);
-            if (response.IsSuccessStatusCode) _token = null;
         }
         finally { _token = null; }
     }
