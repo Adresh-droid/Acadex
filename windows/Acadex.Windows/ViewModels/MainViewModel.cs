@@ -298,6 +298,13 @@ public sealed class MainViewModel : ViewModelBase
         }
     }
 
+    public async Task NavigateFromUiAsync(string page)
+    {
+        Error = "";
+        Success = "";
+        await NavigateAsync(page);
+    }
+
     public async Task NavigateAsync(string page)
     {
         if (!IsAuthenticated) return;
