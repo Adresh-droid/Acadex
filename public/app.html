@@ -305,6 +305,7 @@ else if(a==='swa'){var x=DEV[+d.i];if(!x||!x.token)return;var ot=tok(),ou=U;loca
 else if(a==='rvd'){RV.qs.splice(+d.i,1);if(!RV.qs.length){closeOv();return}var l=$('#rvl'),y=l.scrollTop;l.innerHTML=rvList();l.scrollTop=y;rvCount()}
 else if(a==='rva'){var q=RV.qs[+d.i];q.answer=+d.v;var cd=el.closest('.card');cd.querySelectorAll('.opt').forEach(function(o){o.classList.remove('on')});el.parentNode.classList.add('on')}
 else if(a==='rvc')rvCommit()
+});
 ov.addEventListener('input',function(ev){var t=ev.target,d=t.dataset;if(!RV||!d.rv)return;var q=RV.qs[+d.i];if(d.rv==='t')q.text=t.value;else q.options[+d.j]=t.value});
 
 function shareRes(u,n,t){if(!u){T('This result has no share link.',1);return}var tx=(n?n+"'s result":'Result')+(t?' · '+t:'');if(navigator.share)navigator.share({title:tx,text:tx,url:u}).catch(function(){});else cp(u)}
