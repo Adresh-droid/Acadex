@@ -8,5 +8,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>Acadex.Windows</AssemblyName>
     <RootNamespace>Acadex.Windows</RootNamespace>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="Microsoft.VisualBasic" Version="10.3.0" />
+  </ItemGroup>
 </Project>
