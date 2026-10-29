@@ -1473,6 +1473,7 @@ app.get('/exam/:id', async(req, res) => {
 </form>
 <form id="examStep" class="hidden">
   <div id="studentWelcome" style="margin:10px 0 16px;color:#bbb"></div>
+  <button id="changeAccount" type="button" class="hidden" style="width:auto;margin:0 auto 12px;padding:7px 11px;border:1px solid #ffffff24;border-radius:9px;background:transparent;color:#c9c5bd;font-size:13px;font-weight:600">Not you? Change account</button>
   <input id="pwd" type="password" placeholder="Exam password" autocomplete="off">
   <button id="enter" type="submit">Verify Password</button>
 </form>
@@ -2065,6 +2066,7 @@ async function useSavedDeviceAccount(){
     }
     await saveAccount(d.user,studentAuthToken);
     $('studentWelcome').textContent='Signed in as '+(d.user.displayName||d.user.email)+(d.user.studentId?' · Student ID '+d.user.studentId:'');
+    $('changeAccount').classList.remove('hidden');
     $('accountStep').classList.add('hidden');
     $('accountTabs').classList.add('hidden');
     $('examStep').classList.remove('hidden');
@@ -2111,6 +2113,7 @@ async function loginStudent(){
     const old=await saved();
     if(old&&old.sessionToken&&!old.finishedAt){session={...old,studentAuthToken};await save({...session,examId:EXAM_ID});}
     $('studentWelcome').textContent='Signed in as '+(d.user.displayName||d.user.email)+(d.user.studentId?' · Student ID '+d.user.studentId:'');
+    $('changeAccount').classList.add('hidden');
     $('accountStep').classList.add('hidden');$('accountTabs').classList.add('hidden');$('examStep').classList.remove('hidden');
     const resumed=await tryAutoResume();
     if(!resumed){const authorized=await checkSavedAuthorization();if(!authorized)$('pwd').focus()}
@@ -2135,6 +2138,21 @@ async function startAuthorizedExam(){
 }
 $('startNow').addEventListener('click',startAuthorizedExam);
 $('waitStart').addEventListener('click',()=>{$('gateMessage').textContent='No problem — your password is verified. Your timer is still paused. Press Start Exam Now whenever you are ready.';$('err').textContent=''});
+$('changeAccount').addEventListener('click',()=>{
+  clearLocalDeviceAccount();
+  studentAuthToken='';
+  $('examStep').classList.add('hidden');
+  $('startStep').classList.add('hidden');
+  $('accountStep').classList.remove('hidden');
+  $('accountTabs').classList.remove('hidden');
+  $('changeAccount').classList.add('hidden');
+  $('studentEmail').value='';
+  $('studentPassword').value='';
+  $('pwd').value='';
+  $('err').textContent='';
+  setAccountMode('login');
+  $('studentEmail').focus();
+});
 $('showLogin').addEventListener('click',()=>setAccountMode('login'));
 $('showRegister').addEventListener('click',()=>setAccountMode('register'));
 $('accountStep').addEventListener('submit',e=>{e.preventDefault();loginStudent()});
